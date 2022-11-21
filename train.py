@@ -186,8 +186,8 @@ def main(args):
         optimizer = optim.AdamW(params, lr=cfg.TRAIN.BASE_LR)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    model = nn.DataParallel(model).to(device)
-    n_parameters = sum(p.numel() for p in model.module.parameters() if p.requires_grad)
+    model = model.to(device)
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Model = %s" % str(model))
     print('number of params (M): %.2f' % (n_parameters / 1.e6))
 
@@ -195,7 +195,7 @@ def main(args):
         assert os.path.exists(args.resume_ckpt), "Wrong checkpoint!"
 
         checkpoint = torch.load(args.resume_ckpt)
-        model.module.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
         epoch = checkpoint['epoch']
@@ -400,7 +400,7 @@ def main(args):
 
         # save ckpt 
         checkpoint = {
-            'model_state_dict': model.module.state_dict(),
+            'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
 
             'epoch': epoch + 1,
