@@ -14,137 +14,6 @@ import torch.nn.functional as F
 from pycocotools import mask
 from collections import defaultdict
 
-from utils.common import get_rank, get_world_size
-
-
-class PTR(Dataset):
-    def __init__(self, data_dir, phase='train', sub=False, cfg=None):
-        super(PTR, self).__init__()
-        
-        assert phase in ['train', 'val', 'test']
-        assert cfg.WEAK_SUP.TYPE in ['', 'bbox', 'bbox_center']
-        assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
-
-        self.sub = sub
-        self.phase = phase 
-        self.img_size = cfg.DATA.IMG_SIZE
-        self.num_slots = cfg.MODEL.SLOT.NUM
-        self.image_dir = os.path.join(data_dir, 'images', self.phase)
-        self.scene_dir = os.path.join(data_dir, 'scenes', self.phase)
-
-        self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
-        if self.sub:
-            split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
-            split_data = json.load(open(split_data_dir, 'r'))
-            self.files = sorted(split_data[str(self.ws_split_ratio)]['known'])
-        else:
-            self.files = sorted(os.listdir(self.image_dir))
-        self.len_files = len(self.files)
-
-        self.weak_supervision = cfg.WEAK_SUP.TYPE
-        self.ws_random_prop = cfg.WEAK_SUP.RAND_PROP
-
-        if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
-            self.use_batch_fusion = True
-            self.batch_size = cfg.TRAIN.BATCH_SIZE
-            self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
-        else:
-            self.use_batch_fusion = False
-        
-        self.img_train_transform = transforms.Compose([
-            transforms.Resize((self.img_size, self.img_size)),
-            transforms.ToTensor()])
-        
-        self.img_val_transform = transforms.Compose([
-            transforms.Resize((self.img_size, self.img_size)),
-            transforms.ToTensor()])
-            
-        self.mask_resize = transforms.Resize((self.img_size, self.img_size))
-
-    def __getitem__(self, index):
-        index = index % self.len_files
-
-        image_name = self.files[index]
-        image = Image.open(os.path.join(self.image_dir, image_name)).convert("RGB")    
-        w, h = image.size
-
-        scene_name = image_name[:-3] + 'json'
-        metadata = json.load(open(os.path.join(self.scene_dir, scene_name)))
-
-        if self.phase == 'train':
-            image = self.img_train_transform(image)
-            sample = {'image': image}
-
-        elif self.phase == 'val': 
-            try:
-                image = self.img_val_transform(image)
-                gt_masks = [] 
-                for obj in metadata['objects']:
-                    gt_masks.append(obj['obj_mask']) 
-                gt_masks = torch.tensor(mask.decode(gt_masks), dtype=torch.long)
-                gt_masks = torch.einsum('hwn -> nhw', gt_masks)
-                gt_masks = self.mask_resize(gt_masks.unsqueeze(1)).squeeze(1)
-                gt_masks = torch.cat([(torch.sum(gt_masks, dim=0, keepdim=True) == 0).long(), gt_masks], dim=0)
-                # gt_masks: [n_objs + 1, H, W]
-
-                # for multi-batch processing, pad dummy masks.
-                # this may affect the performance measuremnets.
-                n_masks = gt_masks.shape[0] 
-                if n_masks < self.num_slots:
-                    gt_masks = torch.cat((gt_masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
-
-                sample = {'image': image, 'masks': gt_masks.float()}    
-
-            except Exception as e:
-                print(e)
-
-        if self.weak_supervision:
-            # the label having only -1 means that no informantion is given
-            bbox = torch.full((self.num_slots, 4), -1.)
-            bbox_center = torch.full((self.num_slots, 2), -1.)
-            bbox_gt = torch.full((self.num_slots, 4), -1.)
-            bbox_center_gt = torch.full((self.num_slots, 2), -1.)
-
-            # for background 
-            bbox[0] = torch.tensor([0, 0, 0, 0])
-            bbox_center[0] =  torch.tensor([0, 0])
-            bbox_gt[0] = torch.tensor([0, 0, 0, 0])
-            bbox_center_gt[0] =  torch.tensor([0, 0])
-
-            # for objects (due to the background, index begins with 1)
-            # TODO: exception for the case of #objs > #slots
-            ''' if you want to include background pos (which is 0,0)
-            for obj_i in range(1, len(metadata['objects']) + 1):
-                if np.random.random() < self.ws_random_prop:
-                    gt_bbox = metadata['objects'][obj_i-1]['bbox']
-                    bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                    bbox_center[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-                gt_bbox = metadata['objects'][obj_i-1]['bbox']
-            '''
-            for obj_i in range(len(metadata['objects'])):
-                gt_bbox = metadata['objects'][obj_i]['bbox']
-                if np.random.random() < self.ws_random_prop:
-                    bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                    bbox_center[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-                bbox_gt[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                bbox_center_gt[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-            # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
-            sample['bbox'] = bbox - 0.5
-            sample['bbox_center'] = bbox_center - 0.5
-            sample['bbox_gt'] = bbox_gt - 0.5
-            sample['bbox_center_gt'] = bbox_center_gt - 0.5
-        
-        return sample
-        
-    def __len__(self):
-        # make sub dataset longer
-        # to prevent early stop in dataloader when zip original and sub loader
-        if self.sub and self.use_batch_fusion:
-            repeat_num = math.ceil(1 / self.ws_split_ratio)
-            repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
-            return self.len_files * repeat_num
-        else:
-            return self.len_files
 
 class CLEVR(Dataset):
     def __init__(self, data_dir, phase='train', sub=False, cfg=None):
@@ -287,287 +156,11 @@ class CLEVR(Dataset):
             return self.len_files
 
 
-class MultiDspritesGray(Dataset):
+class CLEVRTEX(Dataset):
     def __init__(self, data_dir, phase='train', sub=False, cfg=None):
-        super(MultiDspritesGray, self).__init__()
-        assert phase in ['train', 'val', 'test']
-        assert cfg.WEAK_SUP.TYPE in ['', 'bbox', 'bbox_center']
-        assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
-
-        self.sub = sub
-        self.phase = phase
-        self.img_size = cfg.DATA.IMG_SIZE
-        self.num_slots = cfg.MODEL.SLOT.NUM
-        self.image_dir = os.path.join(data_dir, 'images', self.phase)
-        self.mask_dir = os.path.join(data_dir, 'masks', self.phase)
-        self.scene_dir = os.path.join(data_dir, 'scenes')
-        self.metadata = json.load(open(os.path.join(self.scene_dir, f"MultiDsprites_{self.phase}_scenes.json")))
-        
-        self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
-        if self.sub:
-            split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
-            split_data = json.load(open(split_data_dir, 'r'))
-            self.files = sorted(split_data[str(self.ws_split_ratio)]['known'])
-        else:
-            self.files = sorted(os.listdir(self.image_dir))
-        self.len_files = len(self.files)
-
-        self.weak_supervision = cfg.WEAK_SUP.TYPE
-        self.ws_random_prop = cfg.WEAK_SUP.RAND_PROP
-
-        if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
-            self.use_batch_fusion = True
-            self.batch_size = cfg.TRAIN.BATCH_SIZE
-            self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
-        else:
-            self.use_batch_fusion = False
-                
-        self.masks = defaultdict(list)
-        masks = sorted(os.listdir(self.mask_dir))
-        for mask in masks: 
-            split =  mask.split('_')
-            filename = '_'.join(split[:3]) + '.png'
-            self.masks[filename].append(mask)
-
-            # without backgrounds
-            # if split[3] != '0.png': 
-            #     filename = '_'.join(split[:3]) + '.png'
-            #     self.masks[filename].append(mask)
-
-        del masks 
-
-        self.crop_size = cfg.DATA.CROP_SIZE
-        if self.crop_size > 0:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-        else:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-    
-        self.center_crop = transforms.CenterCrop(self.crop_size)
-        self.mask_resize = transforms.Resize((self.img_size, self.img_size))
-
-
-    def __getitem__(self, index):
-        index = index % self.len_files
-        
-        filename = self.metadata['scenes'][index]['image_filename']
-        while filename not in self.files:
-            index += 1
-            filename = self.metadata['scenes'][index]['image_filename']
-
-        image = Image.open(os.path.join(self.image_dir, filename)).convert("RGB")
-        w, h = image.size
-
-        if self.phase == 'train':
-            image = self.img_train_transform(image)
-            sample = {'image': image}
-        elif self.phase == 'val': 
-            image = self.img_val_transform(image)
-            # masks = [ self.img_val_transform(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L"))
-            #           for mask_filename in self.masks[filename] ]
-            masks = [ (transforms.functional.pil_to_tensor(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L")) // 255).long()
-                      for mask_filename in self.masks[filename] ]
-            masks = torch.stack(masks, dim=0) # (N + 1, 1, H, W)
-            if self.crop_size > 0:
-                masks = self.center_crop(masks) 
-            masks = self.mask_resize(masks).squeeze(1) # (N + 1, H, W)
-            n_masks = masks.shape[0]
-            # TODO: should we include background 
-            if n_masks < self.num_slots:
-                masks = torch.cat((masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
-            sample = {'image': image, 'masks': masks.float()}
-        
-        if self.weak_supervision != "":
-            bbox = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_gt = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center_gt = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            # for obj_i in range(len(self.metadata['scenes'][index]['objects'])): # if you want to include background pos (which is 0,0)
-            for obj_i in range(1, len(self.metadata['scenes'][index]['objects'])):
-                gt_bbox = self.metadata['scenes'][index]['objects'][obj_i]['bbox']
-                if obj_i == 0 or np.random.random() < self.ws_random_prop:
-                    bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                    bbox_center[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-                bbox_gt[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                bbox_center_gt[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-            # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
-            sample['bbox'] = bbox - 0.5
-            sample['bbox_center'] = bbox_center - 0.5
-            sample['bbox_gt'] = bbox_gt - 0.5
-            sample['bbox_center_gt'] = bbox_center_gt - 0.5
-
-        return sample
-        
-    def __len__(self):
-        # make sub dataset longer
-        # to prevent early stop in dataloader when zip original and sub loader
-
-        if self.sub and self.use_batch_fusion:
-            repeat_num = math.ceil(1 / self.ws_split_ratio)
-            repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
-            return self.len_files * repeat_num
-        else:
-            return self.len_files
-
-
-class Tetrominoes(Dataset):
-    def __init__(self, data_dir, phase='train', sub=False, cfg=None):
-        super(Tetrominoes, self).__init__()
-        assert phase in ['train', 'val', 'test']
-        assert cfg.WEAK_SUP.TYPE in ['', 'bbox', 'bbox_center']
-        assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
-
-        self.sub = sub
-        self.phase = phase
-        self.img_size = cfg.DATA.IMG_SIZE
-        self.num_slots = cfg.MODEL.SLOT.NUM
-        self.image_dir = os.path.join(data_dir, 'images', self.phase)
-        self.mask_dir = os.path.join(data_dir, 'masks', self.phase)
-        self.scene_dir = os.path.join(data_dir, 'scenes')
-        self.metadata = json.load(open(os.path.join(self.scene_dir, f"TETROMINOES_{self.phase}_scenes.json")))
-        
-        self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
-        if self.sub:
-            split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
-            split_data = json.load(open(split_data_dir, 'r'))
-            self.files = sorted(split_data[str(self.ws_split_ratio)]['known'])
-        else:
-            self.files = sorted(os.listdir(self.image_dir))
-        self.len_files = len(self.files)
-
-        self.weak_supervision = cfg.WEAK_SUP.TYPE
-        self.ws_random_prop = cfg.WEAK_SUP.RAND_PROP
-
-        if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
-            self.use_batch_fusion = True
-            self.batch_size = cfg.TRAIN.BATCH_SIZE
-            self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
-        else:
-            self.use_batch_fusion = False
-                
-        self.masks = defaultdict(list)
-        masks = sorted(os.listdir(self.mask_dir))
-        for mask in masks: 
-            split =  mask.split('_')
-            filename = '_'.join(split[:3]) + '.png'
-            self.masks[filename].append(mask)
-
-            # without backgrounds
-            # if split[3] != '0.png': 
-            #     filename = '_'.join(split[:3]) + '.png'
-            #     self.masks[filename].append(mask)
-
-        del masks 
-
-        self.crop_size = cfg.DATA.CROP_SIZE
-        if self.crop_size > 0:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-        else:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-    
-        self.center_crop = transforms.CenterCrop(self.crop_size)
-        self.mask_resize = transforms.Resize((self.img_size, self.img_size))
-
-
-    def __getitem__(self, index):
-        index = index % self.len_files
-        
-        filename = self.metadata['scenes'][index]['image_filename']
-        while filename not in self.files:
-            index += 1
-            filename = self.metadata['scenes'][index]['image_filename']
-
-        image = Image.open(os.path.join(self.image_dir, filename)).convert("RGB")
-        w, h = image.size
-
-        if self.phase == 'train':
-            image = self.img_train_transform(image)
-            sample = {'image': image}
-        elif self.phase == 'val': 
-            image = self.img_val_transform(image)
-            # masks = [ self.img_val_transform(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L"))
-            #           for mask_filename in self.masks[filename] ]
-            masks = [ (transforms.functional.pil_to_tensor(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L")) // 255).long()
-                      for mask_filename in self.masks[filename] ]
-            masks = torch.stack(masks, dim=0) # (N + 1, 1, H, W)
-            if self.crop_size > 0:
-                masks = self.center_crop(masks) 
-            masks = self.mask_resize(masks).squeeze(1) # (N + 1, H, W)
-            n_masks = masks.shape[0]
-            # TODO: should we include background 
-            if n_masks < self.num_slots:
-                masks = torch.cat((masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
-            sample = {'image': image, 'masks': masks.float()}
-        
-        if self.weak_supervision != "":
-            bbox = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_gt = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center_gt = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            # for obj_i in range(len(self.metadata['scenes'][index]['objects'])): # if you want to include background pos (which is 0,0)
-            for obj_i in range(1, len(self.metadata['scenes'][index]['objects'])):
-                gt_bbox = self.metadata['scenes'][index]['objects'][obj_i]['bbox']
-                if obj_i == 0 or np.random.random() < self.ws_random_prop:
-                    bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                    bbox_center[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-                bbox_gt[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                bbox_center_gt[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
-            # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
-            sample['bbox'] = bbox - 0.5
-            sample['bbox_center'] = bbox_center - 0.5
-            sample['bbox_gt'] = bbox_gt - 0.5
-            sample['bbox_center_gt'] = bbox_center_gt - 0.5
-
-        return sample
-        
-    def __len__(self):
-        # make sub dataset longer
-        # to prevent early stop in dataloader when zip original and sub loader
-
-        if self.sub and self.use_batch_fusion:
-            repeat_num = math.ceil(1 / self.ws_split_ratio)
-            repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
-            return self.len_files * repeat_num
-        else:
-            return self.len_files
-
-
-class ObjectsRoom(Dataset):
-    def __init__(self, data_dir, phase='train', sub=False, cfg=None):
-        super(ObjectsRoom, self).__init__()
+        super(CLEVRTEX, self).__init__()
         assert phase in ['train', 'val']
-        assert cfg.WEAK_SUP.TYPE in ['', 'bbox', 'bbox_center']
+        assert cfg.WEAK_SUP.TYPE in ['', 'bbox_center']
         assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
 
         self.sub = sub
@@ -577,8 +170,130 @@ class ObjectsRoom(Dataset):
         self.image_dir = os.path.join(data_dir, 'images', self.phase)
         self.mask_dir = os.path.join(data_dir, 'masks', self.phase)
         self.scene_dir = os.path.join(data_dir, 'scenes')
-        self.metadata = json.load(open(os.path.join(self.scene_dir, f"ObjectsRoom_{self.phase}_scenes.json")))
         
+        self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
+        if self.sub:
+            # TODO: supervision_splits.json
+            split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
+            split_data = json.load(open(split_data_dir, 'r'))
+            self.files = sorted(split_data[str(self.ws_split_ratio)]['known'])
+        else:
+            self.files = sorted(os.listdir(self.image_dir))
+        self.len_files = len(self.files)
+
+        self.weak_supervision = cfg.WEAK_SUP.TYPE
+        self.ws_random_prop = cfg.WEAK_SUP.RAND_PROP
+
+        if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
+            self.use_batch_fusion = True
+            self.batch_size = cfg.TRAIN.BATCH_SIZE
+            self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
+        else:
+            self.use_batch_fusion = False
+
+        self.crop_size = cfg.DATA.CROP_SIZE
+        if self.crop_size > 0:
+            self.img_train_transform = transforms.Compose([
+                transforms.CenterCrop(self.crop_size),
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor()])
+
+            self.img_val_transform = transforms.Compose([
+                transforms.CenterCrop(self.crop_size),
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor()])
+        else:
+            self.img_train_transform = transforms.Compose([
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor()])
+
+            self.img_val_transform = transforms.Compose([
+                transforms.Resize((self.img_size, self.img_size)),
+                transforms.ToTensor()])
+    
+        self.center_crop = transforms.CenterCrop(self.crop_size)
+        self.mask_resize = transforms.Resize((self.img_size, self.img_size))
+
+
+    def __getitem__(self, index):
+        index = index % self.len_files
+
+        image_name = self.files[index]
+        image = Image.open(os.path.join(self.image_dir, image_name)).convert("RGB") 
+        w, h = image.size
+
+        scene_name = image_name[:-3] + 'json'
+        metadata = json.load(open(os.path.join(self.scene_dir, self.phase, scene_name)))
+
+        if self.phase == 'train':
+            image = self.img_train_transform(image)
+            sample = {'image': image}
+        elif self.phase == 'val': 
+            image = self.img_val_transform(image)
+            mask_name = image_name[:-4] + "_flat.png"
+            gt_masks = transforms.functional.pil_to_tensor(Image.open(os.path.join(self.mask_dir, mask_name))).squeeze(0).long() 
+            gt_masks = F.one_hot(gt_masks, len(metadata['objects']) + 1).permute(2, 0, 1)
+            if self.crop_size > 0:
+                gt_masks = self.center_crop(gt_masks) 
+            gt_masks = self.mask_resize(gt_masks)
+            # `gt_masks`: (N+1, H, W)
+
+            n_masks = gt_masks.shape[0]
+            if n_masks < self.num_slots:
+                gt_masks = torch.cat((gt_masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
+        
+            sample = {'image': image, 'masks': gt_masks.float()}
+
+        if self.weak_supervision != "":
+
+            # the label having only -1 means that no informantion is given
+            bbox_center = torch.full((self.num_slots, 2), -1., requires_grad=False)
+            bbox_center_gt = torch.full((self.num_slots, 2), -1., requires_grad=False)
+
+            # for background 
+            # TODO: how to handle bbox for background?
+            bbox_center[0] =  torch.tensor([0, 0], requires_grad=False)
+            bbox_center_gt[0] =  torch.tensor([0, 0], requires_grad=False)
+
+            # for objects (due to the background, index begins with 1)
+            for obj_i in range(len(metadata['objects'])):
+                gt_bbox_center = metadata['objects'][obj_i]['pixel_coords'][:2] # except for the last element which is depth
+                if np.random.random() < self.ws_random_prop:
+                    bbox_center[obj_i] =  torch.tensor([ gt_bbox_center[0] / w, gt_bbox_center[1] / h ])
+                bbox_center_gt[obj_i] =  torch.tensor([ gt_bbox_center[0] / w, gt_bbox_center[1] / h ])
+            # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
+            sample['bbox_center'] = bbox_center - 0.5
+            sample['bbox_center_gt'] = bbox_center_gt - 0.5
+
+        return sample
+        
+    def __len__(self):
+        # make sub dataset longer
+        # to prevent early stop in dataloader when zip original and sub loader
+
+        if self.sub and self.use_batch_fusion:
+            repeat_num = math.ceil(1 / self.ws_split_ratio)
+            repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
+            return self.len_files * repeat_num
+        else:
+            return self.len_files
+
+
+class PTR(Dataset):
+    def __init__(self, data_dir, phase='train', sub=False, cfg=None):
+        super(PTR, self).__init__()
+        
+        assert phase in ['train', 'val', 'test']
+        assert cfg.WEAK_SUP.TYPE in ['', 'bbox', 'bbox_center']
+        assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
+
+        self.sub = sub
+        self.phase = phase 
+        self.img_size = cfg.DATA.IMG_SIZE
+        self.num_slots = cfg.MODEL.SLOT.NUM
+        self.image_dir = os.path.join(data_dir, 'images', self.phase)
+        self.scene_dir = os.path.join(data_dir, 'scenes', self.phase)
+
         self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
         if self.sub:
             split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
@@ -597,102 +312,95 @@ class ObjectsRoom(Dataset):
             self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
         else:
             self.use_batch_fusion = False
-                
-        self.masks = defaultdict(list)
-        masks = sorted(os.listdir(self.mask_dir))
-        for mask in masks: 
-            split =  mask.split('_')
-            filename = '_'.join(split[:3]) + '.png'
-            self.masks[filename].append(mask)
-
-            # without backgrounds
-            # if split[3] != '0.png': 
-            #     filename = '_'.join(split[:3]) + '.png'
-            #     self.masks[filename].append(mask)
-
-        del masks 
-
-        self.crop_size = cfg.DATA.CROP_SIZE
-        if self.crop_size > 0:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-        else:
-            self.img_train_transform = transforms.Compose([
-                # TODO: center crop? [29: 221, 64: 256] in official google github
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-    
-        self.center_crop = transforms.CenterCrop(self.crop_size)
+        
+        self.img_train_transform = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.ToTensor()])
+        
+        self.img_val_transform = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.ToTensor()])
+            
         self.mask_resize = transforms.Resize((self.img_size, self.img_size))
-
 
     def __getitem__(self, index):
         index = index % self.len_files
-        
-        filename = self.metadata['scenes'][index]['image_filename']
-        while filename not in self.files:
-            index += 1
-            filename = self.metadata['scenes'][index]['image_filename']
 
-        image = Image.open(os.path.join(self.image_dir, filename)).convert("RGB")
+        image_name = self.files[index]
+        image = Image.open(os.path.join(self.image_dir, image_name)).convert("RGB")    
         w, h = image.size
+
+        scene_name = image_name[:-3] + 'json'
+        metadata = json.load(open(os.path.join(self.scene_dir, scene_name)))
 
         if self.phase == 'train':
             image = self.img_train_transform(image)
             sample = {'image': image}
+
         elif self.phase == 'val': 
-            image = self.img_val_transform(image)
-            # masks = [ self.img_val_transform(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L"))
-            #           for mask_filename in self.masks[filename] ]
-            masks = [ (transforms.functional.pil_to_tensor(Image.open(os.path.join(self.mask_dir, mask_filename)).convert("L")) // 255).long()
-                      for mask_filename in self.masks[filename] ]
-            masks = torch.stack(masks, dim=0) # (N + 1, 1, H, W)
-            if self.crop_size > 0:
-                masks = self.center_crop(masks) 
-            masks = self.mask_resize(masks).squeeze(1) # (N + 1, H, W)
-            n_masks = masks.shape[0]
-            # TODO: should we include background 
-            if n_masks < self.num_slots:
-                masks = torch.cat((masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
-            sample = {'image': image, 'masks': masks.float()}
-        
-        if self.weak_supervision != "":
-            bbox = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_gt = torch.tensor([[-1., -1., -1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            bbox_center_gt = torch.tensor([[-1., -1.] for _ in range(self.num_slots)], requires_grad=False)
-            # for obj_i in range(len(self.metadata['scenes'][index]['objects'])): # if you want to include background pos (which is 0,0)
-            for obj_i in range(1, len(self.metadata['scenes'][index]['objects'])):
-                gt_bbox = self.metadata['scenes'][index]['objects'][obj_i]['bbox']
-                if obj_i == 0 or np.random.random() < self.ws_random_prop:
+            try:
+                image = self.img_val_transform(image)
+                gt_masks = [] 
+                for obj in metadata['objects']:
+                    gt_masks.append(obj['obj_mask']) 
+                gt_masks = torch.tensor(mask.decode(gt_masks), dtype=torch.long)
+                gt_masks = torch.einsum('hwn -> nhw', gt_masks)
+                gt_masks = self.mask_resize(gt_masks.unsqueeze(1)).squeeze(1)
+                gt_masks = torch.cat([(torch.sum(gt_masks, dim=0, keepdim=True) == 0).long(), gt_masks], dim=0)
+                # gt_masks: [n_objs + 1, H, W]
+
+                # for multi-batch processing, pad dummy masks.
+                # this may affect the performance measuremnets.
+                n_masks = gt_masks.shape[0] 
+                if n_masks < self.num_slots:
+                    gt_masks = torch.cat((gt_masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
+
+                sample = {'image': image, 'masks': gt_masks.float()}    
+
+            except Exception as e:
+                print(e)
+
+        if self.weak_supervision:
+            # the label having only -1 means that no informantion is given
+            bbox = torch.full((self.num_slots, 4), -1.)
+            bbox_center = torch.full((self.num_slots, 2), -1.)
+            bbox_gt = torch.full((self.num_slots, 4), -1.)
+            bbox_center_gt = torch.full((self.num_slots, 2), -1.)
+
+            # for background 
+            bbox[0] = torch.tensor([0, 0, 0, 0])
+            bbox_center[0] =  torch.tensor([0, 0])
+            bbox_gt[0] = torch.tensor([0, 0, 0, 0])
+            bbox_center_gt[0] =  torch.tensor([0, 0])
+
+            # for objects (due to the background, index begins with 1)
+            # TODO: exception for the case of #objs > #slots
+            ''' if you want to include background pos (which is 0,0)
+            for obj_i in range(1, len(metadata['objects']) + 1):
+                if np.random.random() < self.ws_random_prop:
+                    gt_bbox = metadata['objects'][obj_i-1]['bbox']
                     bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                    bbox_center[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
+                    bbox_center[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
+                gt_bbox = metadata['objects'][obj_i-1]['bbox']
+            '''
+            for obj_i in range(len(metadata['objects'])):
+                gt_bbox = metadata['objects'][obj_i]['bbox']
+                if np.random.random() < self.ws_random_prop:
+                    bbox[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
+                    bbox_center[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
                 bbox_gt[obj_i] = torch.tensor([gt_bbox[0] / w, gt_bbox[1] / w, gt_bbox[2] / h, gt_bbox[3] / h], requires_grad=False)
-                bbox_center_gt[obj_i] = torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
+                bbox_center_gt[obj_i] =  torch.tensor([ (gt_bbox[0] + gt_bbox[1]) / 2 / w, (gt_bbox[2] + gt_bbox[3]) / 2/ h ], requires_grad=False)
             # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
             sample['bbox'] = bbox - 0.5
             sample['bbox_center'] = bbox_center - 0.5
             sample['bbox_gt'] = bbox_gt - 0.5
             sample['bbox_center_gt'] = bbox_center_gt - 0.5
-
+        
         return sample
         
     def __len__(self):
         # make sub dataset longer
         # to prevent early stop in dataloader when zip original and sub loader
-
         if self.sub and self.use_batch_fusion:
             repeat_num = math.ceil(1 / self.ws_split_ratio)
             repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
@@ -821,129 +529,6 @@ class MOVi(Dataset):
             sample['bbox'] = bbox - 0.5
             sample['bbox_center'] = bbox_center - 0.5
             sample['bbox_gt'] = bbox_gt - 0.5
-            sample['bbox_center_gt'] = bbox_center_gt - 0.5
-
-        return sample
-        
-    def __len__(self):
-        # make sub dataset longer
-        # to prevent early stop in dataloader when zip original and sub loader
-
-        if self.sub and self.use_batch_fusion:
-            repeat_num = math.ceil(1 / self.ws_split_ratio)
-            repeat_num = math.ceil(repeat_num / ((1 - self.batch_fusion_ratio) / self.batch_fusion_ratio))
-            return self.len_files * repeat_num
-        else:
-            return self.len_files
-
-
-class CLEVRTEX(Dataset):
-    def __init__(self, data_dir, phase='train', sub=False, cfg=None):
-        super(CLEVRTEX, self).__init__()
-        assert phase in ['train', 'val']
-        assert cfg.WEAK_SUP.TYPE in ['', 'bbox_center']
-        assert not sub or (sub and cfg.WEAK_SUP.SPLIT.RATIO < 1)
-
-        self.sub = sub
-        self.phase = phase
-        self.img_size = cfg.DATA.IMG_SIZE
-        self.num_slots = cfg.MODEL.SLOT.NUM
-        self.image_dir = os.path.join(data_dir, 'images', self.phase)
-        self.mask_dir = os.path.join(data_dir, 'masks', self.phase)
-        self.scene_dir = os.path.join(data_dir, 'scenes')
-        
-        self.ws_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
-        if self.sub:
-            # TODO: supervision_splits.json
-            split_data_dir = os.path.join(data_dir, 'images', 'supervision_splits.json')
-            split_data = json.load(open(split_data_dir, 'r'))
-            self.files = sorted(split_data[str(self.ws_split_ratio)]['known'])
-        else:
-            self.files = sorted(os.listdir(self.image_dir))
-        self.len_files = len(self.files)
-
-        self.weak_supervision = cfg.WEAK_SUP.TYPE
-        self.ws_random_prop = cfg.WEAK_SUP.RAND_PROP
-
-        if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
-            self.use_batch_fusion = True
-            self.batch_size = cfg.TRAIN.BATCH_SIZE
-            self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
-        else:
-            self.use_batch_fusion = False
-
-        self.crop_size = cfg.DATA.CROP_SIZE
-        if self.crop_size > 0:
-            self.img_train_transform = transforms.Compose([
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.CenterCrop(self.crop_size),
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-        else:
-            self.img_train_transform = transforms.Compose([
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-
-            self.img_val_transform = transforms.Compose([
-                transforms.Resize((self.img_size, self.img_size)),
-                transforms.ToTensor()])
-    
-        self.center_crop = transforms.CenterCrop(self.crop_size)
-        self.mask_resize = transforms.Resize((self.img_size, self.img_size))
-
-
-    def __getitem__(self, index):
-        index = index % self.len_files
-
-        image_name = self.files[index]
-        image = Image.open(os.path.join(self.image_dir, image_name)).convert("RGB") 
-        w, h = image.size
-
-        scene_name = image_name[:-3] + 'json'
-        metadata = json.load(open(os.path.join(self.scene_dir, self.phase, scene_name)))
-
-        if self.phase == 'train':
-            image = self.img_train_transform(image)
-            sample = {'image': image}
-        elif self.phase == 'val': 
-            image = self.img_val_transform(image)
-            mask_name = image_name[:-4] + "_flat.png"
-            gt_masks = transforms.functional.pil_to_tensor(Image.open(os.path.join(self.mask_dir, mask_name))).squeeze(0).long() 
-            gt_masks = F.one_hot(gt_masks, len(metadata['objects']) + 1).permute(2, 0, 1)
-            if self.crop_size > 0:
-                gt_masks = self.center_crop(gt_masks) 
-            gt_masks = self.mask_resize(gt_masks)
-            # `gt_masks`: (N+1, H, W)
-
-            n_masks = gt_masks.shape[0]
-            if n_masks < self.num_slots:
-                gt_masks = torch.cat((gt_masks, torch.zeros((self.num_slots - n_masks, self.img_size, self.img_size))), dim=0)
-        
-            sample = {'image': image, 'masks': gt_masks.float()}
-
-        if self.weak_supervision != "":
-
-            # the label having only -1 means that no informantion is given
-            bbox_center = torch.full((self.num_slots, 2), -1., requires_grad=False)
-            bbox_center_gt = torch.full((self.num_slots, 2), -1., requires_grad=False)
-
-            # for background 
-            # TODO: how to handle bbox for background?
-            bbox_center[0] =  torch.tensor([0, 0], requires_grad=False)
-            bbox_center_gt[0] =  torch.tensor([0, 0], requires_grad=False)
-
-            # for objects (due to the background, index begins with 1)
-            for obj_i in range(len(metadata['objects'])):
-                gt_bbox_center = metadata['objects'][obj_i]['pixel_coords'][:2] # except for the last element which is depth
-                if np.random.random() < self.ws_random_prop:
-                    bbox_center[obj_i] =  torch.tensor([ gt_bbox_center[0] / w, gt_bbox_center[1] / h ])
-                bbox_center_gt[obj_i] =  torch.tensor([ gt_bbox_center[0] / w, gt_bbox_center[1] / h ])
-            # pos range -0.5 ~ 0.5 (to match with gaussian rand_pos and etc)
-            sample['bbox_center'] = bbox_center - 0.5
             sample['bbox_center_gt'] = bbox_center_gt - 0.5
 
         return sample

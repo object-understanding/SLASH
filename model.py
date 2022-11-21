@@ -6,7 +6,6 @@ import torchvision
 from torch import nn
 from scipy.optimize import linear_sum_assignment
 
-from utils.slot import * 
 
 # Kernel Normalized Kernel
 class WNConv(nn.Conv2d):
@@ -52,7 +51,6 @@ class SlotAttention(nn.Module):
         self.scale = (cfg.MODEL.SLOT.DIM // cfg.MODEL.SLOT.ATTN_HEADS) ** -0.5
         self.weak_sup = cfg.WEAK_SUP.TYPE
         self.use_no_obj = cfg.WEAK_SUP.USE_NO_OBJ
-        self.rand_pos_type = cfg.WEAK_SUP.RAND_POS_TYPE
         self.init_using_sup = cfg.WEAK_SUP.INIT_USING_SUP
         self.weak_sup_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
         self.temperature = cfg.MODEL.SLOT.TEMPERATURE
@@ -64,8 +62,6 @@ class SlotAttention(nn.Module):
         self.pos_pred_use_no_obj = cfg.POS_PRED.USE_NO_OBJ
         self.pos_pred_enc_mode = cfg.POS_PRED.POS_ENC_MODE
         self.pos_pred_location_list = cfg.POS_PRED.LOCATIONS
-        self.use_background_pos = cfg.POS_PRED.BACKGROUND_POS
-        self.background_pos_value = cfg.POS_PRED.BACKGROUND_POS_VALUE
         self.pos_enc_mode = cfg.POS_PRED.POS_ENC_MODE
 
         self.use_batch_fusion = cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion'
@@ -92,12 +88,8 @@ class SlotAttention(nn.Module):
                 nn.Linear(pos_num, self.slot_dim * 2), nn.ReLU(), nn.Linear(self.slot_dim * 2, self.slot_dim)
             )
             # random position initialize to fill in where pos == -1 
-            if self.rand_pos_type == 'standard_gaussian' and not self.use_no_obj:
-                self.pos_mu = torch.zeros(1, 1, pos_num)
-                self.pos_sigma = torch.ones(1, 1, pos_num)
-            elif self.rand_pos_type == 'learnable_gaussian'and not self.use_no_obj:
-                self.pos_mu = nn.Parameter(torch.randn(1, 1, pos_num))
-                self.pos_sigma = nn.Parameter(torch.abs(torch.randn(1, 1, pos_num)))
+            self.pos_mu = torch.zeros(1, 1, pos_num)
+            self.pos_sigma = torch.ones(1, 1, pos_num)
         else:
             # original slot initialize
             self.slots_mu = nn.Parameter(torch.randn(1, 1, self.slot_dim))
@@ -168,10 +160,6 @@ class SlotAttention(nn.Module):
         pos_pred = None
         if not train or (train and self.weak_sup_split_ratio >= 1 - 1e-4):
             if self.pos_pred_use_gt and pos != None:
-                if self.use_background_pos:
-                    background_slots = slots[:, -1:] # [B, 1, D_slot]
-                    slots = slots[:, :-1] # [B, K-1, D_slot]
-
                 pos_pred = self.pos_predictor(slots.detach())
                 # pos_pred = self.pos_predictor(slots.clone()) # [B, K (or K-1), 2]
 
@@ -191,12 +179,6 @@ class SlotAttention(nn.Module):
                 
                 pos_encoder_input = pos_pred_with_gt.clone() # [B, K (or K-1), 2]
 
-                if self.use_background_pos:
-                    slots = torch.cat([slots, background_slots], dim=1) # [B, K, D_slot]
-                    background_pos = torch.full((slots.shape[0], 1, 2), 
-                                        self.background_pos_value).to(self.device) # [B, 1, 2]
-                    pos_encoder_input = torch.cat([pos_encoder_input, background_pos], dim=1) # [B, K, 2]
-
                 pos_encoder_input = pos_encoder_input.detach()
                 if self.pos_enc_mode == 'learnable':
                     pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
@@ -210,22 +192,10 @@ class SlotAttention(nn.Module):
                 slots = slots + pos_encoded_slots
 
             else:
-                if self.use_background_pos:
-                    background_slots = slots[:, -1:] # [B, 1, D_slot]
-                    slots = slots[:, :-1] # [B, K-1, D_slot]
-
                 pos_pred = self.pos_predictor(slots.detach())
                 # pos_pred = self.pos_predictor(slots.clone())
 
-                pos_encoder_input = pos_pred.clone()
-
-                if self.use_background_pos:
-                    slots = torch.cat([slots, background_slots], dim=1) # [B, K, D_slot]
-                    background_pos = torch.full((slots.shape[0], 1, 2), 
-                                        self.background_pos_value).to(self.device) # [B, 1, 2]
-                    pos_encoder_input = torch.cat([pos_encoder_input, background_pos], dim=1) # [B, K, 2]
-
-                pos_encoder_input = pos_encoder_input.detach()
+                pos_encoder_input = pos_pred.detach().clone()
                 if self.pos_enc_mode == 'learnable':
                     pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
                 elif self.pos_enc_mode == 'enc_pos_emb':
@@ -238,10 +208,6 @@ class SlotAttention(nn.Module):
                 slots = slots + pos_encoded_slots
 
         elif self.use_batch_fusion and train:
-            if self.use_background_pos:
-                background_slots = slots[:, -1:] # [B, 1, D_slot]
-                slots = slots[:, :-1] # [B, K-1, D_slot]
-            
             pos_pred = self.pos_predictor(slots.detach())
 
             # extract pos_pred_for_samples_wo_sup and pos_for_samples_wo_sup 
@@ -272,12 +238,6 @@ class SlotAttention(nn.Module):
                 pos_encoder_input[:self.batch_fusion_ws_num_samples] = pos_pred_with_gt.clone()
             else:
                 pos_encoder_input = pos_pred.clone()
-
-            if self.use_background_pos:
-                slots = torch.cat([slots, background_slots], dim=1) # [B, K, D_slot]
-                background_pos = torch.full((slots.shape[0], 1, 2), 
-                                    self.background_pos_value).to(self.device) # [B, 1, 2]
-                pos_encoder_input = torch.cat([pos_encoder_input, background_pos], dim=1) # [B, K, 2]
             
             pos_encoder_input = pos_encoder_input.detach()
             if self.pos_enc_mode == 'learnable':
@@ -320,12 +280,9 @@ class SlotAttention(nn.Module):
             if pos is None:
                 pos = -1 * torch.ones(B, K, 2).to(self.device)
             if not self.use_no_obj:
-                if self.rand_pos_type == 'uniform':
-                    rand_pos = torch.rand(pos.shape) - 0.5
-                elif self.rand_pos_type in ['standard_gaussian', 'learnable_gaussian']:
-                    pos_mu = self.pos_mu.expand(B, K, -1)
-                    pos_sigma = torch.abs(self.pos_sigma.expand(B, K, -1))
-                    rand_pos = torch.normal(pos_mu, pos_sigma)
+                pos_mu = self.pos_mu.expand(B, K, -1)
+                pos_sigma = torch.abs(self.pos_sigma.expand(B, K, -1))
+                rand_pos = torch.normal(pos_mu, pos_sigma)
                 if self.use_batch_fusion:
                     pos[self.batch_fusion_ws_num_samples:] = -1.
                 pos = torch.where(pos > -1, pos, rand_pos.to(self.device))

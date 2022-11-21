@@ -20,7 +20,7 @@ from sklearn.metrics import mean_squared_error
 
 from datasets import *
 from model import *
-from utils.evaluator import ARIEvaluator, mBOEvaluator
+from utils.evaluator import ARIEvaluator, mIoUEvaluator
 from utils.config import *
 
 class Config(object): 
@@ -120,16 +120,16 @@ def main(args):
     
     f_ari_result = f_ari_evaluator.get_results()
     ari_result = ari_evaluator.get_results()
-    f_mbo_result = f_mbo_evaluator.get_results()
-    mbo_result = mbo_evaluator.get_results()
+    f_miou_result = f_miou_evaluator.get_results()
+    miou_result = miou_evaluator.get_results()
 
     print(args.checkpoint)
     print("Use position gt:", cfg.WEAK_SUP.TYPE != "" and args.use_weak_sup)
     print("MSE:", total_mse)
     print("FG-ARI:", f_ari_result)
     print("ARI:", ari_result)
-    print("FG-mBO:", f_mbo_result)
-    print("mBO:", mbo_result)
+    print("FG-mIoU:", f_miou_result)
+    print("mIoU:", miou_result)
     
 
     with open(os.path.join(args.workspace, 'eval_results.txt'), 'a') as f:
@@ -137,8 +137,8 @@ def main(args):
         f.write('MSE: {:.4f}\n'.format(total_mse))
         f.write('FG-ARI: {:.4f}\n'.format(f_ari_result))
         f.write('ARI: {:.4f}\n'.format(ari_result))
-        f.write('FG-mBO: {:.4f}\n'.format(f_mbo_result))
-        f.write('mBO: {:.4f}\n'.format(mbo_result))
+        f.write('FG-mIoU: {:.4f}\n'.format(f_miou_result))
+        f.write('mIoU: {:.4f}\n'.format(miou_result))
         f.write('\n')
 
 if __name__=="__main__": 

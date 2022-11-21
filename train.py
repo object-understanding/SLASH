@@ -21,7 +21,6 @@ from model import *
 from utils.vutil import visualize
 from utils.evaluator import ARIEvaluator, mIoUEvaluator
 from utils.config import *
-from utils import misc
 
 print("torch ver:", torch.__version__)
 
@@ -95,13 +94,8 @@ def main(args):
             cfg.POS_PRED.LOCATIONS = cfg.POS_PRED.LOCATIONS[1:] + [-1]
 
     dataset_train_sub = []
-    if cfg.DATA.TYPE in ['ptr', 'PTR']:
-        dataset_train = PTR(data_dir=args.data_dir, phase='train', cfg=cfg)
-        dataset_val = PTR(data_dir=args.data_dir, phase='val', cfg=cfg)
-        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
-            dataset_train_sub = PTR(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
 
-    elif cfg.DATA.TYPE in ['clevr', 'CLEVR']:
+    elif cfg.DATA.TYPE.lower() == 'clevr':
         dataset_train = CLEVR(data_dir=args.data_dir, phase='train', cfg=cfg)
         dataset_val = CLEVR(data_dir=args.data_dir, phase='val', cfg=cfg)
         if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
@@ -113,30 +107,17 @@ def main(args):
         if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
             dataset_train_sub = CLEVRTEX(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
 
-    elif cfg.DATA.TYPE in ['mdg', 'MDG']: 
-        dataset_train = MultiDspritesGray(data_dir=args.data_dir, phase='train', cfg=cfg)
-        dataset_val = MultiDspritesGray(data_dir=args.data_dir, phase='val', cfg=cfg)
+    if cfg.DATA.TYPE.lower() == 'ptr':
+        dataset_train = PTR(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = PTR(data_dir=args.data_dir, phase='val', cfg=cfg)
         if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
-            dataset_train_sub = MultiDspritesGray(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
-    
-    elif cfg.DATA.TYPE in ['tet', 'TET']: 
-        dataset_train = Tetrominoes(data_dir=args.data_dir, phase='train', cfg=cfg)
-        dataset_val = Tetrominoes(data_dir=args.data_dir, phase='val', cfg=cfg)
-        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
-            dataset_train_sub = Tetrominoes(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+            dataset_train_sub = PTR(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
 
     elif cfg.DATA.TYPE.lower() == 'movi': 
         dataset_train = MOVi(data_dir=args.data_dir, phase='train', cfg=cfg)
         dataset_val = MOVi(data_dir=args.data_dir, phase='val', cfg=cfg)
-        dataset_val_from_train = MOVi(data_dir=args.data_dir, phase='val_from_train', cfg=cfg)
         if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
             dataset_train_sub = MOVi(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
-
-    elif cfg.DATA.TYPE.lower() == 'objr': 
-        dataset_train = ObjectsRoom(data_dir=args.data_dir, phase='train', cfg=cfg)
-        dataset_val = ObjectsRoom(data_dir=args.data_dir, phase='val', cfg=cfg)
-        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
-            dataset_train_sub = ObjectsRoom(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
 
     print(f"Dataset size: train({len(dataset_train)}), train_sub({len(dataset_train_sub)}), val({len(dataset_val)})")
     
@@ -186,14 +167,6 @@ def main(args):
         shuffle=False, 
         num_workers=cfg.DATA.NUM_WORKERS
     )
-    
-    if cfg.DATA.TYPE.lower() == 'movi': 
-        data_loader_val_from_train = torch.utils.data.DataLoader(
-            dataset_val_from_train, 
-            pin_memory=True, 
-            batch_size=1, 
-            shuffle=False, 
-            num_workers=cfg.DATA.NUM_WORKERS)
 
     data_loader_vis = torch.utils.data.DataLoader(
         dataset_val, 
@@ -310,11 +283,6 @@ def main(args):
 
         print(f"Backprop target losses: {backprop_target_losses}")
         for sample in tqdm(data_loader, desc='Epoch {}/{}'.format(epoch+1, cfg.TRAIN.EPOCHS), total=len_data_loader):
-            # if use_batch_fusion:
-            #     sample_tmp = dict()
-            #     for k in sample[0].keys():
-            #         sample_tmp[k] = torch.cat([sample[0][k], sample[1][k]], dim=0)
-            #     sample = sample_tmp
             if use_batch_fusion:
                 try:
                     sample_sub = next(sub_data_iterator)
@@ -384,26 +352,19 @@ def main(args):
                         # zero mask invalid matching
                         # valid_matching_mask = (pos_gt_aranged > -1).float().to(pos_pred.device)
                         valid_matching_mask = (pos_gt_aranged > -1).float().to(device)
-                        # pos_gt_aranged[pos_gt_aranged < -1] = 0.
-                        # pos_pred[pos_gt_aranged < -1] = 0.
 
-                        # pos_loss = criterion(pos_pred, pos_gt_aranged.to(pos_pred.device))
                         pos_loss = criterion(pos_pred * valid_matching_mask, pos_gt_aranged.to(device) * valid_matching_mask)
                         total_pos_loss[pos_loc] += pos_loss.item()
 
                         if learn_pos_pred or use_batch_fusion:
-                            # loss += pos_loss * cfg.TRAIN.POS_LOSS_WEIGHT
                             pos_loss *= cfg.TRAIN.POS_LOSS_WEIGHT
                             scaler.scale(pos_loss).backward(retain_graph=True)
-                            # pos_loss.backward(retain_graph=True)
 
                 scaler.scale(loss).backward()
-                # loss.backward()
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), 2.0)
                 scaler.step(optimizer)
                 scaler.update()
-                # optimizer.step()
                 optimizer.zero_grad()
             
             del outputs['recons'], outputs['masks'], outputs['slots'], outputs['attn']
@@ -450,10 +411,6 @@ def main(args):
             'decay_step_ratio': cfg.TRAIN.DECAY_STEP_RATIO,
             'decay_rate': cfg.TRAIN.DECAY_RATE,
             'elapsed_time': elapsed_time
-            # 'args': args
-
-            # 'best_val_loss': best_val_loss,
-            # 'best_epoch': best_epoch,
         }
 
         prev_checkpoint_list = os.listdir(cfg.OUTPUT.DIR)
@@ -477,8 +434,6 @@ def main(args):
                     if eval_i == 0:
                         eval_suffix = "_without_sup"
                         weak_sup_flag = False # specific case for weak sup split
-                        # if cfg.WEAK_SUP.TYPE != "" and cfg.WEAK_SUP.SPLIT.RATIO == 1:
-                            # continue
                     else: # which is 1
                         weak_sup_flag = True # default setting
                         eval_suffix = "_with_sup"
@@ -497,15 +452,8 @@ def main(args):
                     f_miou_evaluator = mIoUEvaluator()
 
                     val_loader_list = [data_loader_val]
-                    if cfg.DATA.TYPE.lower() == 'movi': 
-                        val_loader_list.append(data_loader_val_from_train)
-                    for val_i, loader_val in enumerate(val_loader_list):
-                        if val_i == 0:
-                            print('val set!')
-                        elif val_i == 1:
-                            continue # skip val from train
-                            print('val from train set (for MOVi)!')
-                            eval_suffix += '_val_from_train'
+                    for loader_val in val_loader_list:
+                        print('val set!')
                         for sample in tqdm(loader_val, desc='Val{} {}/{}'.format(eval_suffix, epoch+1, cfg.TRAIN.EPOCHS)):
                             image = sample['image'].to(device)
                             if cfg.WEAK_SUP.TYPE != "" and weak_sup_flag:
@@ -531,11 +479,10 @@ def main(args):
 
                             if cfg.POS_PRED.USE_POS_PRED:
                                 for pos_i, pos_loc in enumerate(cfg.POS_PRED.LOCATIONS):
-                                    pos_pred = outputs['pos_pred'][pos_i]
-                                    # pos_gt = pos_gt.to(pos_pred.device)
-                                    pos_gt = pos_gt.to(device)
                                     # `pos_pred`: (B, K, 2)
                                     # `pos_gt`: (B, K', 2)
+                                    pos_pred = outputs['pos_pred'][pos_i]
+                                    pos_gt = pos_gt.to(device)
 
                                     # cal cost map to match gt to pred
                                     cost_map = torch.cdist(pos_pred, pos_gt).cpu().detach().numpy() # [B, K, K]
@@ -547,7 +494,6 @@ def main(args):
                                     pos_gt_aranged[pos_gt_aranged < -1] = 0.
                                     pos_pred[pos_gt_aranged < -1] = 0.
 
-                                    # pos_loss = criterion(pos_pred, pos_gt)
                                     pos_loss = criterion(pos_pred, pos_gt_aranged)
                                     total_val_pos_loss[pos_loc] += pos_loss.item()
 
@@ -621,6 +567,7 @@ def main(args):
                             pos_existence_mask = None 
                             
                             log_img = None
+                            # TODO: vis for low res
                             if not(0.25 in cfg.MODEL.FEAT_PYRAMID.RES_RATE_LIST or \
                             0.5 in cfg.MODEL.FEAT_PYRAMID.RES_RATE_LIST):
                                 log_img = visualize(image=image, 
@@ -637,8 +584,6 @@ def main(args):
                     
                 del outputs, masks, attns, image, recons, recon_combined, log_img   
                 del ari_evaluator, f_ari_evaluator, miou_evaluator, f_miou_evaluator
-                # TODO: sanity check for what it does
-                # torch.cuda.empty_cache()
 
 
     if log_writer is not None:
