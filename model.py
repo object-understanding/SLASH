@@ -61,9 +61,7 @@ class SlotAttention(nn.Module):
         self.use_pos_pred = cfg.POS_PRED.USE_POS_PRED
         self.pos_pred_use_gt = cfg.POS_PRED.USE_GT # TODO: name of variable?
         self.pos_pred_use_no_obj = cfg.POS_PRED.USE_NO_OBJ
-        self.pos_pred_enc_mode = cfg.POS_PRED.POS_ENC_MODE
         self.pos_pred_location_list = cfg.POS_PRED.LOCATIONS
-        self.pos_enc_mode = cfg.POS_PRED.POS_ENC_MODE
 
         self.use_batch_fusion = cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion'
         self.batch_fusion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
@@ -153,10 +151,7 @@ class SlotAttention(nn.Module):
 
         if self.use_pos_pred:
             self.pos_predictor = PositionPredictor(cfg)
-            if self.pos_enc_mode == 'learnable':
-                self.pos_encoder = PositionEncoder(cfg)
-            elif 'enc_pos_emb' in self.pos_enc_mode:
-                self.pos_encoder = nn.Linear(self.hid_dim, self.slot_dim)
+            self.pos_encoder = PositionEncoder(cfg)
 
     def predict_and_encode_position(self, slots, pos, pos_gt_aranged, pos_emb, train=False):
         assert slots is not None 
@@ -184,14 +179,7 @@ class SlotAttention(nn.Module):
                 pos_encoder_input = pos_pred_with_gt.clone() # [B, K (or K-1), 2]
 
                 pos_encoder_input = pos_encoder_input.detach()
-                if self.pos_enc_mode == 'learnable':
-                    pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
-                elif self.pos_enc_mode == 'enc_pos_emb':
-                    pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                    pos_encoded_slots = self.pos_encoder(pos_encoded_slots.detach())
-                elif self.pos_enc_mode == 'learnable_enc_pos_emb':
-                    pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                    pos_encoded_slots = self.pos_encoder(pos_encoded_slots)
+                pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
                 
                 slots = slots + pos_encoded_slots
 
@@ -200,14 +188,7 @@ class SlotAttention(nn.Module):
                 # pos_pred = self.pos_predictor(slots.clone())
 
                 pos_encoder_input = pos_pred.detach().clone()
-                if self.pos_enc_mode == 'learnable':
-                    pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
-                elif self.pos_enc_mode == 'enc_pos_emb':
-                    pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                    pos_encoded_slots = self.pos_encoder(pos_encoded_slots.detach())
-                elif self.pos_enc_mode == 'learnable_enc_pos_emb':
-                    pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                    pos_encoded_slots = self.pos_encoder(pos_encoded_slots)
+                pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
                 
                 slots = slots + pos_encoded_slots
 
@@ -244,14 +225,7 @@ class SlotAttention(nn.Module):
                 pos_encoder_input = pos_pred.clone()
             
             pos_encoder_input = pos_encoder_input.detach()
-            if self.pos_enc_mode == 'learnable':
-                pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
-            elif self.pos_enc_mode == 'enc_pos_emb':
-                pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                pos_encoded_slots = self.pos_encoder(pos_encoded_slots.detach())
-            elif self.pos_enc_mode == 'learnable_enc_pos_emb':
-                pos_encoded_slots = pos_emb.get_pos_emb(pos_encoder_input + 0.5).to(self.device)
-                pos_encoded_slots = self.pos_encoder(pos_encoded_slots)
+            pos_encoded_slots = self.pos_encoder(pos_encoder_input).to(self.device)
             
             slots = slots + pos_encoded_slots
 

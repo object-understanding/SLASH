@@ -10,8 +10,6 @@ import torch
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.utils.tensorboard import SummaryWriter
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from scipy.optimize import linear_sum_assignment
 from tqdm import tqdm
@@ -581,10 +579,7 @@ def main(args):
         log_writer.close()
 
 if __name__ == "__main__":
-    # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
-
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
-
     parser = argparse.ArgumentParser('Slot Attention training script', parents=[get_args_parser()])
     args = parser.parse_args()
     main(args=args)

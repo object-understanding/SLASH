@@ -58,7 +58,6 @@ WEAK_SUP:
 POS_PRED:
   USE_POS_PRED: False
   USE_GT: False # TODO: name of variable?
-  POS_ENC_MODE: "learnable" 
   USE_NO_OBJ: False
   LOCATIONS: [] # 1,2,3,.. to iteration number # TODO: name of variable?
   PP_SIZE: 'base' # ['small', 'base', 'big']

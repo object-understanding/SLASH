@@ -25,5 +25,4 @@ WEAK_SUP:
 POS_PRED:
   USE_POS_PRED: True
   USE_GT: True
-  POS_ENC_MODE: "learnable"
   LOCATIONS: [1,2,3]
