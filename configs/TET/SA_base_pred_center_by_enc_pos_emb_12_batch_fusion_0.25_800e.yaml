@@ -1,0 +1,37 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'tet' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 35
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_pred_center_by_pos_emb_12_batch_fusion_0.25_tet_800e/'
+TRAIN:
+  EPOCHS: 800
+  BATCH_SIZE: 256
+  POS_LOSS_WEIGHT: 0.01
+WEAK_SUP:
+  TYPE: "bbox_center"
+  USE_NO_OBJ: False
+  RANDOM_PROP: 1.0
+  RAND_POS_TYPE: "uniform" # it can be "standard_gaussian"
+  INIT_USING_SUP: False
+  SPLIT:
+    RATIO: 0.1
+    TRAIN:
+      MODE: 'batch_fusion' # ['','interval', 'epoch_ranges', 'batch_fusion']
+      BATCH_FUSION_RATIO: 0.25
+POS_PRED:
+  USE_POS_PRED: True
+  USE_GT: True
+  POS_ENC_MODE: "enc_pos_emb"
+  LOCATIONS: [1,2] # -1 to last one, 1,2,3,.. to iteration number # TODO: name of variable?
+MODEL:
+  SLOT:
+    NUM: 4
+  ENC_DEPTH: 4
+  DEC_DEPTH: 4
+  DEC_INIT_SIZE: 35
+  HID_DIM: 32
+  MLP_HID_DIM: 128

@@ -1,0 +1,12 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  CROP_SIZE: 198 # from from original image, 0 means no crop
+  NUM_WORKERS: 30
+TRAIN:
+  OPTIMIZER: 'adam'
+OUTPUT:
+  DIR: './output_dir/sa_base_crop_adam_clevr6_1000e/'

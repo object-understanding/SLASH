@@ -1,0 +1,33 @@
+# v3
+# deepen mlp depth from 2 to 4
+# enlarge mlp hid dim from 64 to 128
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+TRAIN:
+  EPOCHS: 100
+OUTPUT:
+  DIR: './output_dir/clv6_sp_ours_v1/'
+MODEL:
+  SET_PREDICTION: 
+    MLP_HID_DIM: 128 
+    MLP_DEPTH: 4
+    NUM_CLASSES: 18 
+  SLOT:
+    ATTN_SMOOTH: "normed_softmax"
+SET_PREDICTION:
+  LOSS: "huber" # ['huber', 'bce']
+  ATTRIBUTES: ["object_size", "material", "shape", "color"]
+  USE_SEPARATE_POS: False
+  DISTANCE_THRESHOLDS: [0.05, 0.1, 0.2, 0.3, -1]
+POS_PRED:
+  USE_POS_PRED: True
+  USE_GT: False
+  POS_ENC_MODE: "learnable"
+  LOCATIONS: [1,2] 
+WEAK_SUP:
+  TYPE: 'bbox_center' # ['', 'bbox', 'bbox_center']

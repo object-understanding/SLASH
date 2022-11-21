@@ -1,0 +1,9 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'MOVi', 'movi']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_v0_movi_1000e/'

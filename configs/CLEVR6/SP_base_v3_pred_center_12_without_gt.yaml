@@ -1,0 +1,27 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sp_base_v3_pred_center_12_without_gt_clevr6_1000e/'
+MODEL:
+  SET_PREDICTION: 
+    MLP_HID_DIM: 128
+    MLP_DEPTH: 4
+    NUM_CLASSES: 18
+SET_PREDICTION:
+  LOSS: "huber" # ['huber', 'bce']
+  ATTRIBUTES: ["object_size", "material", "shape", "color"]
+  USE_SEPARATE_POS: False
+  DISTANCE_THRESHOLDS: [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, -1]
+POS_PRED:
+  USE_POS_PRED: True
+  USE_GT: False
+  POS_ENC_MODE: "learnable"
+  LOCATIONS: [1,2] 
+WEAK_SUP:
+  TYPE: 'bbox_center' # ['', 'bbox', 'bbox_center']
+

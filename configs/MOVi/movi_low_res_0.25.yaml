@@ -1,0 +1,12 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/movi_low_res_0.25/'
+MODEL:
+  FEAT_PYRAMID:
+    RES_RATE_LIST: [0.25] # use can add element (candidate: 1, 0.5, 0.25, 0.125) as much as NUM_LOW_RES

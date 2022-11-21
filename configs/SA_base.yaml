@@ -1,0 +1,105 @@
+# full configuration
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  CROP_SIZE: 0 # from from original image, 0 means no crop
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/'
+TRAIN:
+  IS_DISTRIBUTED: True
+  EVAL_ON_SINGLE_GPU: False
+  BATCH_SIZE: 256 # 64 x 4gpus
+  EPOCHS: 1000
+  OPTIMIZER: 'adamw' # change this as adam
+  BASE_LR: 0.0004
+  DECAY_RATE: 0.5
+  WARMUP_STEP_RATIO: 0.02 # warmup_steps: 10000
+  DECAY_STEP_RATIO: 0.2 # decay_steps: 100000
+  EVAL_INTERVAL: 100
+  WEIGHTED_RECON_LOSS:
+    USE_WRL: False # WRL: Weighted Recon Loss
+    SOFT: True
+    SCALE_BY: 'mean' # TODO: how to scale mask_affinity
+    THRESHOLD: 0.0
+  GLOBAL_RECON_LOSS_WEIGHT: 1.
+  POS_LOSS_WEIGHT: 1.
+  ANCHOR_POS_LOSS_WEIGHT: 1.
+  AUX_POS_LOSS_WEIGHT: 1.
+MODEL:
+  SLOT:
+    NUM: 7
+    DIM: 64
+    ITERATIONS: 3
+    ATTN_HEADS: 1
+    ATTN_SMOOTH: '' # ['', 'linear', 'softmax', 'normed_linear', 'normed_softmax', 'gaussian', 'conv']
+    ATTN_SMOOTH_SIZE: 5
+    ATTN_SMOOTH_GAU_MIN: 0.1
+    ATTN_SMOOTH_GAU_MAX: 2.0
+    SELF_ATTN: False
+    TEMPERATURE: 1.0
+    USE_GRU: True 
+    USE_LSTM: False
+    USE_PRUNING: False 
+    PRUNING_TYPE: 'soft' # ['soft', 'hard']
+    PRUNING_THRESHOLD_PIXEL: 0.0
+    PRUNING_THRESHOLD_SLOT: 0.0
+    PRUNING_LOCATIONS: [1, 2, 3] # [1, 2, 3]
+    PERT: 
+      USE_PERT: False  
+      SIGMA: 0
+  GLOBAL_SLOT:
+    USE_GS: False
+    ABSTRACT_SIZE: 4
+    DEC_DEPTH: 6
+    DEC_INIT_SIZE: 2
+  FEAT_PYRAMID:
+    USE_LOW_RES: False
+    RES_RATE_LIST: [1.] # you can add element (candidate: 1., 0.5, 0.25, 0.125) 
+    AGGREGATION: 'slot'
+  SET_PREDICTION: 
+    MLP_HID_DIM: 64 
+    NUM_CLASSES: 18 
+  ENC_DEPTH: 4
+  DEC_DEPTH: 6
+  DEC_INIT_SIZE: 8
+  DEC_STRIDE: 2
+  HID_DIM: 64
+  DEC_HID_DIM: 0 # 0: ENC_HID_DIM == DEC_HID_DIM
+  MLP_HID_DIM: 128
+  PE_SCALE: 1.0
+WEAK_SUP:
+  TYPE: '' # ['', 'bbox', 'bbox_center']
+  USE_NO_OBJ: False # TODO: find alternative for the variable name 'use_no_obj'
+  RAND_PROP: 1.0
+  RAND_POS_TYPE: 'uniform' # ['uniform', 'standard_gaussian', 'learnable_gaussian']
+  INIT_USING_SUP: False
+  SPLIT:
+    RATIO: 1.0 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+    TRAIN:
+      MODE: '' # ['','interval', 'epoch_ranges', 'batch_fusion'] # TODO: naming
+      INTERVAL: 0 
+      DURATION: 0
+      INTERVAL_START: 0 # should be in [0, INTERVAL-DURATION]
+      EPOCH_RANGES: [[0, 0]]
+      BATCH_FUSION_RATIO: 0.
+POS_PRED:
+  USE_POS_PRED: False
+  USE_GT: False # TODO: name of variable?
+  POS_ENC_MODE: "learnable" # ["learnable", "sinusoidal"]
+  USE_NO_OBJ: False
+  LOCATIONS: [] # -1 to last one, 1,2,3,.. to iteration number # TODO: name of variable?
+  USE_ANCHOR_SLOTS: False
+  NUM_ANCHORS_PER_BATCH: 0
+  ANCHOR_TYPE: 'static' # ['static', 'uniform', 'random']
+  AUX_POS_LOSS: False
+  BACKGROUND_POS: False
+  BACKGROUND_POS_VALUE: 1.
+  PP_SIZE: 'base' # ['small', 'base', 'big']
+SET_PREDICTION:
+  LOSS: "huber" # ['huber', 'bce']
+  ATTRIBUTES: ["object_size", "material", "shape", "color"]
+  USE_SEPARATE_POS: False
+  DISTANCE_THRESHOLDS: []

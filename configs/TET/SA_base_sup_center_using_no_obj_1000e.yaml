@@ -1,0 +1,22 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'tet' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'mdg', 'MDG', 'tet', 'TET']
+  IMG_SIZE: 35
+  CROP_SIZE: 0
+  NUM_WORKERS: 8
+OUTPUT:
+  DIR: './output_dir/sa_base_tet_1000e/'
+MODEL:
+  SLOT:
+    NUM: 4
+  ENC_DEPTH: 4
+  DEC_DEPTH: 4
+  DEC_INIT_SIZE: 35
+  HID_DIM: 32
+  MLP_HID_DIM: 128
+WEAK_SUP:
+  TYPE: 'bbox_center' # ['', 'bbox', 'bbox_center']
+  USE_NO_OBJ: True # TODO: find alternative for the variable name 'use_no_obj'
+  INIT_USING_SUP: True

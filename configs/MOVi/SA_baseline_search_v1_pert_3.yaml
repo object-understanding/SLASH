@@ -1,0 +1,21 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'MOVi', 'movi']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_v1_pert_3_movi_1000e/'
+MODEL:
+  SLOT:
+    PERT: 
+      USE_PERT: True 
+      SIGMA: 3 
+    NUM: 7
+    DIM: 128
+  ENC_DEPTH: 4
+  DEC_DEPTH: 6
+  HID_DIM: 64
+  DEC_HID_DIM: 64
+  MLP_HID_DIM: 128

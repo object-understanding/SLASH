@@ -1,0 +1,23 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'mdg' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'mdg', 'MDG']
+  IMG_SIZE: 64
+  CROP_SIZE: 0
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_sup_box_no_obj_mdg_1000e/'
+MODEL:
+  SLOT:
+    NUM: 6
+  ENC_DEPTH: 4
+  DEC_DEPTH: 4
+  DEC_INIT_SIZE: 64
+  HID_DIM: 32
+  MLP_HID_DIM: 128
+WEAK_SUP:
+  TYPE: 'bbox' # ['', 'bbox', 'bbox_center']
+  USE_NO_OBJ: True # TODO: find alternative for the variable name 'use_no_obj'
+  INIT_USING_SUP: True
+  

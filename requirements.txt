@@ -1,0 +1,8 @@
+pycocotools==2.0.4
+scipy==1.7.3
+tensorboard==2.10.0
+h5py==3.7.0
+pandas==1.3.5
+seaborn==0.12.1
+scikit-learn==1.0.2
+setuptools==59.5.0

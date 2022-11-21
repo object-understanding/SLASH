@@ -1,0 +1,728 @@
+import copy
+import argparse
+import datetime
+import os
+import time
+import yaml
+from pathlib import Path
+
+import torch
+import torch.optim as optim
+import torchvision.utils as vutils
+from torch.utils.tensorboard import SummaryWriter
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+from scipy.optimize import linear_sum_assignment
+from tqdm import tqdm
+
+from datasets import *
+from model import *
+from utils.vutil import visualize
+from utils.evaluator import ARIEvaluator, mBOEvaluator
+from utils.config import *
+from utils import misc
+
+print("torch ver:", torch.__version__)
+
+def get_args_parser():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--config_file', default='configs/config.yaml', type=str)
+    parser.add_argument('--data_dir', default='/workspace/dataset/clevr_with_masks/CLEVR6', type=str)
+    parser.add_argument('--batch_size', default=0, type=int, help='Desired batch_size: 64 x num_gpus')
+    parser.add_argument('--lr', default=0, type=float)
+    parser.add_argument('--eval_interval', default=0, type=int)
+    parser.add_argument('--num_workers', default=-1, type=int)
+    parser.add_argument('--output_dir', default='', type=str)
+    parser.add_argument('--output_dir_suffix', default='', type=str)
+    parser.add_argument('--resume_ckpt', default='', type=str)
+    parser.add_argument('--epochs', default=0, type=int)
+    parser.add_argument('--num_vis', default=4, type=int)
+
+    # distributed training parameters
+    parser.add_argument('--turn_off_ddp', action='store_true') # TODO: it's deprecated, so erase it 
+    parser.add_argument('--eval_on_single_gpu', action='store_true')
+    # parser.add_argument('--pin_mem', default=0, type=int) # TODO: do we need this?
+
+    return parser
+
+
+def main(args):
+    cfg = set_config(args.config_file)
+
+    if args.eval_on_single_gpu:
+        cfg.TRAIN.EVAL_ON_SINGLE_GPU = True
+    if args.batch_size > 0:
+        cfg.TRAIN.BATCH_SIZE = args.batch_size
+    if args.lr > 0:
+        cfg.TRAIN.BASE_LR = args.lr
+    if args.eval_interval > 0:
+        cfg.TRAIN.EVAL_INTERVAL = args.eval_interval
+    if args.num_workers > -1:
+        cfg.DATA.NUM_WORKERS = args.num_workers
+    if args.epochs > 0:
+        cfg.TRAIN.EPOCHS = args.epochs
+    if args.output_dir != '': 
+        cfg.OUTPUT.DIR = args.output_dir
+    if cfg.OUTPUT.DIR[-1] == '/':
+        cfg.OUTPUT.DIR = f"{cfg.OUTPUT.DIR[:-1]}_{args.output_dir_suffix}"
+    else:
+        cfg.OUTPUT.DIR = f"{cfg.OUTPUT.DIR}_{args.output_dir_suffix}"
+    cfg_str = '__'.join( ['{}={}'.format(k, v) for k, v in vars(cfg).items()] )
+
+    use_amp = True
+
+    device = torch.device(cfg.DEVICE if torch.cuda.is_available() else "cpu")
+    print(f"{device}, {torch.cuda.device_count()}")
+
+    if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'batch_fusion':
+        use_batch_fusion = True
+        batch_sufion_ratio = cfg.WEAK_SUP.SPLIT.TRAIN.BATCH_FUSION_RATIO
+        batch_fusion_ws_num_samples = int(cfg.TRAIN.BATCH_SIZE * batch_sufion_ratio)
+    else:
+        use_batch_fusion = False
+
+    if cfg.OUTPUT.DIR is not None: 
+        Path(cfg.OUTPUT.DIR).mkdir(parents=True, exist_ok=True)
+        log_writer = SummaryWriter(log_dir=cfg.OUTPUT.DIR)
+        log_writer.add_text('hparams', cfg_str)
+    else: 
+        log_writer = None
+
+    # sort cfg.POS_PRED.LOCATIONS in valid order
+    if len(cfg.POS_PRED.LOCATIONS) > 0:
+        cfg.POS_PRED.LOCATIONS.sort()
+        if cfg.POS_PRED.LOCATIONS[0] == -1:
+            cfg.POS_PRED.LOCATIONS = cfg.POS_PRED.LOCATIONS[1:] + [-1]
+
+    dataset_train_sub = []
+    if cfg.DATA.TYPE in ['ptr', 'PTR']:
+        dataset_train = PTR(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = PTR(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = PTR(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    elif cfg.DATA.TYPE in ['clevr', 'CLEVR']:
+        dataset_train = CLEVR(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = CLEVR(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = CLEVR(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    elif cfg.DATA.TYPE.lower() == 'clevrtex':
+        dataset_train = CLEVRTEX(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = CLEVRTEX(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = CLEVRTEX(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    elif cfg.DATA.TYPE in ['mdg', 'MDG']: 
+        dataset_train = MultiDspritesGray(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = MultiDspritesGray(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = MultiDspritesGray(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+    
+    elif cfg.DATA.TYPE in ['tet', 'TET']: 
+        dataset_train = Tetrominoes(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = Tetrominoes(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = Tetrominoes(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    elif cfg.DATA.TYPE.lower() == 'movi': 
+        dataset_train = MOVi(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = MOVi(data_dir=args.data_dir, phase='val', cfg=cfg)
+        dataset_val_from_train = MOVi(data_dir=args.data_dir, phase='val_from_train', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = MOVi(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    elif cfg.DATA.TYPE.lower() == 'objr': 
+        dataset_train = ObjectsRoom(data_dir=args.data_dir, phase='train', cfg=cfg)
+        dataset_val = ObjectsRoom(data_dir=args.data_dir, phase='val', cfg=cfg)
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
+            dataset_train_sub = ObjectsRoom(data_dir=args.data_dir, phase='train', sub=True, cfg=cfg)
+
+    print(f"Dataset size: train({len(dataset_train)}), train_sub({len(dataset_train_sub)}), val({len(dataset_val)})")
+    
+    device = torch.device(cfg.DEVICE if torch.cuda.is_available() else "cpu")
+
+    if use_batch_fusion:
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, 
+            pin_memory=True, 
+            batch_size=cfg.TRAIN.BATCH_SIZE-batch_fusion_ws_num_samples, 
+            shuffle=True, 
+            num_workers=cfg.DATA.NUM_WORKERS)
+        data_loader_train_sub = torch.utils.data.DataLoader(
+                dataset_train_sub, 
+                pin_memory=True, 
+                batch_size=batch_fusion_ws_num_samples, 
+                shuffle=True, 
+                num_workers=cfg.DATA.NUM_WORKERS
+            )
+    else:
+        data_loader_train = torch.utils.data.DataLoader(
+            dataset_train, 
+            pin_memory=True, 
+            batch_size=cfg.TRAIN.BATCH_SIZE, 
+            shuffle=True, 
+            num_workers=cfg.DATA.NUM_WORKERS
+        )
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1:
+            data_loader_train_sub = torch.utils.data.DataLoader(
+                dataset_train_sub, 
+                pin_memory=True, 
+                batch_size=cfg.TRAIN.BATCH_SIZE, 
+                shuffle=True, 
+                num_workers=cfg.DATA.NUM_WORKERS
+            )
+            if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'interval':
+                ws_train_interval = cfg.WEAK_SUP.SPLIT.TRAIN.INTERVAL
+                ws_train_duration = cfg.WEAK_SUP.SPLIT.TRAIN.DURATION
+                ws_train_interval_start = cfg.WEAK_SUP.SPLIT.TRAIN.INTERVAL_START
+            elif cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'epoch_ranges':
+                ws_train_epoch_ranges = cfg.WEAK_SUP.SPLIT.TRAIN.EPOCH_RANGES
+
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, 
+        pin_memory=True, 
+        batch_size=1, 
+        shuffle=False, 
+        num_workers=cfg.DATA.NUM_WORKERS
+    )
+    
+    if cfg.DATA.TYPE.lower() == 'movi': 
+        data_loader_val_from_train = torch.utils.data.DataLoader(
+            dataset_val_from_train, 
+            pin_memory=True, 
+            batch_size=1, 
+            shuffle=False, 
+            num_workers=cfg.DATA.NUM_WORKERS)
+
+    data_loader_vis = torch.utils.data.DataLoader(
+        dataset_val, 
+        pin_memory=True, 
+        batch_size=args.num_vis, 
+        shuffle=False, 
+        num_workers=cfg.DATA.NUM_WORKERS
+    )
+
+    model = SlotAttentionAutoEncoder(cfg, device=device).to(device)
+
+    criterion = nn.MSELoss()
+    params = [{'params': model.parameters()}]
+    if cfg.TRAIN.OPTIMIZER.lower() == 'adam':
+        optimizer = optim.Adam(params, lr=cfg.TRAIN.BASE_LR)
+    if cfg.TRAIN.OPTIMIZER.lower() == 'adamw':
+        optimizer = optim.AdamW(params, lr=cfg.TRAIN.BASE_LR)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    model = nn.DataParallel(model).to(device)
+    n_parameters = sum(p.numel() for p in model.module.parameters() if p.requires_grad)
+    print("Model = %s" % str(model))
+    print('number of params (M): %.2f' % (n_parameters / 1.e6))
+
+    if args.resume_ckpt != '': 
+        assert os.path.exists(args.resume_ckpt), "Wrong checkpoint!"
+
+        checkpoint = torch.load(args.resume_ckpt)
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        epoch = checkpoint['epoch']
+        cfg.TRAIN.EPOCHS = checkpoint['epochs'] # optional?
+        total_step = checkpoint['total_step']
+        total_steps = checkpoint['total_steps'] # optional?
+        cfg.TRAIN.WARMUP_STEP_RATIO = checkpoint['warmup_step_ratio']
+        cfg.TRAIN.DECAY_STEP_RATIO = checkpoint['decay_step_ratio']
+        cfg.TRAIN.DECAY_RATE = checkpoint['decay_rate']
+
+        # elapsed time to train the checkpoint
+        elapsed_time = checkpoint['elapsed_time']
+
+    else:
+        epoch = 0
+        total_step = 0
+        if cfg.WEAK_SUP.SPLIT.RATIO < 1 and not use_batch_fusion:
+            if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'interval':
+                sub_epochs = cfg.TRAIN.EPOCHS // ws_train_interval * ws_train_duration
+            elif cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'epoch_ranges':
+                sub_epochs = 0
+                for (ws_start, ws_end) in ws_train_epoch_ranges:
+                    sub_epochs += (ws_start + ws_end)
+            main_steps = (cfg.TRAIN.EPOCHS - sub_epochs) * len(data_loader_train)
+            sub_steps = sub_epochs * len(data_loader_train_sub)
+        else:
+            main_steps = cfg.TRAIN.EPOCHS * len(data_loader_train)
+            sub_steps = 0
+        total_steps = main_steps + sub_steps
+
+        print(f"Train Steps: Total({total_steps}) = Main({main_steps}) + Sub({sub_steps})")
+        if sub_steps > 0:
+            print(f"Sub mode: {cfg.WEAK_SUP.SPLIT.TRAIN.MODE}")
+        if use_batch_fusion:
+            print(f"Use batch fusion: Total Batch({cfg.TRAIN.BATCH_SIZE}) = " +
+                  f"Main({cfg.TRAIN.BATCH_SIZE - batch_fusion_ws_num_samples}) " +
+                  f"Sub({batch_fusion_ws_num_samples})")
+
+        elapsed_time = 0
+
+    warmup_steps = total_steps * cfg.TRAIN.WARMUP_STEP_RATIO
+    decay_steps = total_steps * cfg.TRAIN.DECAY_STEP_RATIO
+
+    for epoch in range(epoch, cfg.TRAIN.EPOCHS):
+
+        data_loader = data_loader_train
+
+        # setting learn_pos_pred flag for the train config
+        if cfg.POS_PRED.USE_POS_PRED:
+            if cfg.WEAK_SUP.SPLIT.RATIO < 1:
+                learn_pos_pred = False
+                if cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'epoch_ranges':
+                    for (ws_start, ws_end) in ws_train_epoch_ranges:
+                        if ws_start <= epoch < ws_end:
+                            data_loader = data_loader_train_sub
+                            learn_pos_pred = True
+                            break
+                elif cfg.WEAK_SUP.SPLIT.TRAIN.MODE == 'interval':
+                    if 0 <= epoch % ws_train_interval - ws_train_interval_start < ws_train_duration:
+                        data_loader = data_loader_train_sub
+                        learn_pos_pred = True
+            else:
+                learn_pos_pred = True
+        else:
+            learn_pos_pred = False
+    
+        start_epoch = time.time()
+        model.train()
+        train_loss = 0
+        total_recon_loss = 0
+        total_pos_loss = dict((pos_loc, 0) for pos_loc in cfg.POS_PRED.LOCATIONS)
+
+        backprop_target_losses = ['recon_loss']
+        if learn_pos_pred:
+            backprop_target_losses.append('pos_loss')
+        elif use_batch_fusion:
+            backprop_target_losses.append('pos_loss')
+        
+        if use_batch_fusion:
+            sub_data_iterator = iter(data_loader_train_sub)
+            # data_loader = zip(data_loader_train, data_loader_train_sub)
+            len_data_loader = len(data_loader_train)
+        else:
+            len_data_loader = len(data_loader)
+        
+        num_eps_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+        num_pruned_pixels_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+        num_pruned_slots_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+
+        print(f"Backprop target losses: {backprop_target_losses}")
+        for sample in tqdm(data_loader, desc='Epoch {}/{}'.format(epoch+1, cfg.TRAIN.EPOCHS), total=len_data_loader):
+            # if use_batch_fusion:
+            #     sample_tmp = dict()
+            #     for k in sample[0].keys():
+            #         sample_tmp[k] = torch.cat([sample[0][k], sample[1][k]], dim=0)
+            #     sample = sample_tmp
+            if use_batch_fusion:
+                try:
+                    sample_sub = next(sub_data_iterator)
+                except StopIteration:
+                    sub_data_iterator = iter(data_loader_train_sub)
+                    sample_sub = next(sub_data_iterator)
+                for k in sample.keys():
+                    sample[k] = torch.cat([sample_sub[k], sample[k]], dim=0)
+                del sample_sub
+
+            total_step += 1
+
+            if total_step < warmup_steps:
+                lr = cfg.TRAIN.BASE_LR * (total_step / warmup_steps)
+            else:
+                lr = cfg.TRAIN.BASE_LR
+
+            lr = lr * (cfg.TRAIN.DECAY_RATE ** (total_step / decay_steps))
+
+            optimizer.param_groups[0]['lr'] = lr
+
+            image = sample['image'].to(device)
+            if cfg.WEAK_SUP.TYPE != "" and \
+               (learn_pos_pred or use_batch_fusion or cfg.WEAK_SUP.INIT_USING_SUP != ''):
+                pos = sample[cfg.WEAK_SUP.TYPE].clone().to(device) # for model prediction
+                pos_gt = sample[f"{cfg.WEAK_SUP.TYPE}_gt"].clone() # only for calculating loss
+            elif cfg.WEAK_SUP.TYPE != "": 
+                pos = None
+                pos_gt = sample[f"{cfg.WEAK_SUP.TYPE}_gt"].clone() # only for calculating loss
+            elif cfg.WEAK_SUP.INIT_USING_SUP:
+                pos = sample[cfg.WEAK_SUP.TYPE].clone().to(device) # for model prediction
+                pos_gt = None
+            else:
+                pos = None
+                pos_gt = None
+
+            with torch.cuda.amp.autocast(enabled=use_amp):
+
+                outputs = model(**dict(image=image, pos=pos, train=True))
+
+                # weighted recon loss
+                if cfg.TRAIN.WEIGHTED_RECON_LOSS.USE_WRL:
+                    loss = criterion(outputs['recon_combined'] * (1 - outputs['mask_affinity']), image * (1 - outputs['mask_affinity']))
+                else:
+                    loss = criterion(outputs['recon_combined'], image)
+                total_recon_loss += loss.item()
+                    
+                pos_loss = None
+                if cfg.POS_PRED.USE_POS_PRED:
+
+                    for pos_i, pos_loc in enumerate(cfg.POS_PRED.LOCATIONS):
+                        pos_pred = outputs['pos_pred'][pos_i]
+                        # pos_gt = pos_gt.to(pos_pred.device)
+                        pos_gt = pos_gt.to(device)
+
+                        if use_batch_fusion:
+                            pos_pred_full = pos_pred.clone()
+                            # extract pos_pred_for_samples_wo_sup and pos_for_samples_wo_sup 
+                            # so that they don't participate in gt matching
+                            pos_pred = pos_pred[:batch_fusion_ws_num_samples]
+                            pos_gt = pos_gt[:batch_fusion_ws_num_samples]
+
+                        pos_gt_aranged = outputs["pos_gt_aranged"]
+                        if pos_gt_aranged is None:
+                            # matching gt to pred
+                            cost_map = torch.cdist(pos_pred, pos_gt).cpu().detach().numpy() # [B, K, K]
+                            match_indexes = np.array([linear_sum_assignment(cost_map[i])[1] for i in range(len(pos_gt))]).reshape(-1) # [B*K,]
+                            batch_index = [i // pos_gt.shape[1] for i in range(pos_gt.shape[0] * pos_gt.shape[1])]
+                            pos_gt_aranged = pos_gt[range(len(pos_gt))][batch_index, match_indexes].reshape(pos_gt.shape)
+
+                        # zero mask invalid matching
+                        # valid_matching_mask = (pos_gt_aranged > -1).float().to(pos_pred.device)
+                        valid_matching_mask = (pos_gt_aranged > -1).float().to(device)
+                        # pos_gt_aranged[pos_gt_aranged < -1] = 0.
+                        # pos_pred[pos_gt_aranged < -1] = 0.
+
+                        # pos_loss = criterion(pos_pred, pos_gt_aranged.to(pos_pred.device))
+                        pos_loss = criterion(pos_pred * valid_matching_mask, pos_gt_aranged.to(device) * valid_matching_mask)
+                        total_pos_loss[pos_loc] += pos_loss.item()
+
+                        if learn_pos_pred or use_batch_fusion:
+                            # loss += pos_loss * cfg.TRAIN.POS_LOSS_WEIGHT
+                            pos_loss *= cfg.TRAIN.POS_LOSS_WEIGHT
+                            scaler.scale(pos_loss).backward(retain_graph=True)
+                            # pos_loss.backward(retain_graph=True)
+
+                scaler.scale(loss).backward()
+                # loss.backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), 2.0)
+                scaler.step(optimizer)
+                scaler.update()
+                # optimizer.step()
+                optimizer.zero_grad()
+
+            num_eps_list += torch.mean(outputs['num_eps_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+            num_pruned_pixels_list += torch.mean(outputs['num_pruned_pixels_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+            num_pruned_slots_list += torch.mean(outputs['num_pruned_slots_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+            
+            del outputs['recons'], outputs['masks'], outputs['slots'], outputs['attn'], outputs['num_pruned_pixels_list']
+            del image, sample, outputs, loss, pos_loss
+            # TODO: sanity check for what it does
+            # torch.cuda.empty_cache()
+
+        train_recon_loss = total_recon_loss / len_data_loader
+        train_pos_loss = dict()
+        for pos_loc in cfg.POS_PRED.LOCATIONS:
+            train_pos_loss[pos_loc] = total_pos_loss[pos_loc] / len_data_loader
+        # train_loss = train_recon_loss +\
+        #             train_pos_loss +\
+
+        num_eps_list = num_eps_list / len_data_loader
+        num_pruned_pixels_list = num_pruned_pixels_list / len_data_loader
+        num_pruned_slots_list = num_pruned_slots_list / len_data_loader
+
+        end_epoch = time.time()
+        elapsed_time += end_epoch - start_epoch
+
+        print(
+            "Epoch: {}, Total Loss: {:.3e}, Recon Loss: {:.3e}, Pos Loss: {}, Time: {}".format(
+                epoch+1, 
+                train_loss, 
+                train_recon_loss,
+                train_pos_loss,
+                datetime.timedelta(seconds=int(elapsed_time))
+            )
+        )
+
+        if cfg.MODEL.SLOT.USE_PRUNING:
+            print(f"Avg. num of eps: {num_eps_list.tolist()}") 
+            print(f"Avg. num of pruned pixels: {num_pruned_pixels_list.tolist()}") 
+            print(f"Avg. num of pruned slots: {num_pruned_slots_list.tolist()}") 
+
+        if log_writer is not None: 
+            print('log_dir: {}\n'.format(log_writer.log_dir))
+            log_writer.add_scalar('train_loss', train_loss, epoch+1)
+            log_writer.add_scalar('train_recon_loss', train_recon_loss, epoch+1)
+            for pos_loc in cfg.POS_PRED.LOCATIONS:
+                log_writer.add_scalar(f'train_pos_loss_{pos_loc}', train_pos_loss[pos_loc], epoch+1)
+            log_writer.add_scalar('lr', lr, epoch+1)
+
+            if cfg.MODEL.SLOT.USE_PRUNING: 
+                for t in range(cfg.MODEL.SLOT.ITERATIONS):
+                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
+
+                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
+
+                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
+                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
+
+        # save ckpt 
+        checkpoint = {
+            'model_state_dict': model.module.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+
+            'epoch': epoch + 1,
+            'epochs': cfg.TRAIN.EPOCHS, 
+            'total_step': total_step, 
+            'total_steps': total_steps, 
+            'warmup_step_ratio': cfg.TRAIN.WARMUP_STEP_RATIO,
+            'decay_step_ratio': cfg.TRAIN.DECAY_STEP_RATIO,
+            'decay_rate': cfg.TRAIN.DECAY_RATE,
+            'elapsed_time': elapsed_time
+            # 'args': args
+
+            # 'best_val_loss': best_val_loss,
+            # 'best_epoch': best_epoch,
+        }
+
+        prev_checkpoint_list = os.listdir(cfg.OUTPUT.DIR)
+        for f in prev_checkpoint_list:
+            if "00.pth" not in f:
+                os.remove(os.path.join(cfg.OUTPUT.DIR, f))
+
+        torch.save(
+            checkpoint,
+            os.path.join(cfg.OUTPUT.DIR, f'checkpoint-{epoch+1}.pth'),
+        )
+        torch.save(
+            checkpoint,
+            os.path.join(cfg.OUTPUT.DIR, f'checkpoint-latest.pth'),
+        )
+
+        # evaluation
+        if (epoch+1) % cfg.TRAIN.EVAL_INTERVAL == 0: 
+            with torch.no_grad(): 
+                for eval_i in range(2):
+                    if eval_i == 0:
+                        eval_suffix = "_without_sup"
+                        weak_sup_flag = False # specific case for weak sup split
+                        # if cfg.WEAK_SUP.TYPE != "" and cfg.WEAK_SUP.SPLIT.RATIO == 1:
+                            # continue
+                    else: # which is 1
+                        weak_sup_flag = True # default setting
+                        eval_suffix = "_with_sup"
+                        if cfg.WEAK_SUP.TYPE == "":
+                            continue
+
+                    start_epoch = time.time()
+                    
+                    model.eval()
+                    val_loss = 0
+                    total_val_recon_loss = 0
+                    total_val_pos_loss = dict((pos_loc, 0) for pos_loc in cfg.POS_PRED.LOCATIONS)
+                    ari_evaluator = ARIEvaluator()
+                    f_ari_evaluator = ARIEvaluator()
+                    mbo_evaluator = mBOEvaluator()
+                    f_mbo_evaluator = mBOEvaluator()
+
+                    num_eps_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+                    num_pruned_pixels_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+                    num_pruned_slots_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+
+                    val_loader_list = [data_loader_val]
+                    if cfg.DATA.TYPE.lower() == 'movi': 
+                        val_loader_list.append(data_loader_val_from_train)
+                    for val_i, loader_val in enumerate(val_loader_list):
+                        if val_i == 0:
+                            print('val set!')
+                        elif val_i == 1:
+                            continue # skip val from train
+                            print('val from train set (for MOVi)!')
+                            eval_suffix += '_val_from_train'
+                        for sample in tqdm(loader_val, desc='Val{} {}/{}'.format(eval_suffix, epoch+1, cfg.TRAIN.EPOCHS)):
+                            image = sample['image'].to(device)
+                            if cfg.WEAK_SUP.TYPE != "" and weak_sup_flag:
+                                pos_gt = sample[cfg.WEAK_SUP.TYPE].clone().detach() # only for calculating loss
+                                pos = pos_gt.clone().to(device) # for model prediction
+                            elif cfg.WEAK_SUP.TYPE != "":
+                                pos_gt = sample[cfg.WEAK_SUP.TYPE].clone().detach() # only for calculating loss
+                                pos = None
+                            else:
+                                pos_gt = None
+                                pos = None
+                            
+                            outputs = model(**dict(image=image, pos=pos, train=False))
+                            
+                            attns = torch.stack(outputs['attns'], dim=1)
+                            # `attns`: (B, T, N_heds, N_in, K)
+
+                            recon_combined = outputs['recon_combined']
+                            recons = outputs['recons']
+                            if cfg.TRAIN.WEIGHTED_RECON_LOSS.USE_WRL:
+                                mask_affinity = outputs['mask_affinity']
+                                loss = criterion(recon_combined * (1 - mask_affinity), image * (1 - mask_affinity))
+                            else:
+                                loss = criterion(recon_combined, image)
+                            total_val_recon_loss += loss.item()
+
+                            if cfg.POS_PRED.USE_POS_PRED:
+                                for pos_i, pos_loc in enumerate(cfg.POS_PRED.LOCATIONS):
+                                    pos_pred = outputs['pos_pred'][pos_i]
+                                    # pos_gt = pos_gt.to(pos_pred.device)
+                                    pos_gt = pos_gt.to(device)
+                                    # `pos_pred`: (B, K, 2)
+                                    # `pos_gt`: (B, K', 2)
+
+                                    # cal cost map to match gt to pred
+                                    cost_map = torch.cdist(pos_pred, pos_gt).cpu().detach().numpy() # [B, K, K]
+                                    # match gt and pred using linear sum assignment
+                                    match_indexes = np.array([linear_sum_assignment(cost_map[i])[1] for i in range(len(pos_gt))]).reshape(-1) # [B*K,]
+                                    batch_index = [i // pos_gt.shape[1] for i in range(pos_gt.shape[0] * pos_gt.shape[1])]
+                                    pos_gt_aranged = pos_gt[range(len(pos_gt))][batch_index, match_indexes].reshape(pos_gt.shape)
+                                    # zero mask invalid matching
+                                    pos_gt_aranged[pos_gt_aranged < -1] = 0.
+                                    pos_pred[pos_gt_aranged < -1] = 0.
+
+                                    # pos_loss = criterion(pos_pred, pos_gt)
+                                    pos_loss = criterion(pos_pred, pos_gt_aranged)
+                                    total_val_pos_loss[pos_loc] += pos_loss.item()
+
+                            masks = outputs['masks']
+                            f_ari_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
+                            ari_evaluator.evaluate(masks, sample['masks'], device)
+                            f_mbo_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
+                            mbo_evaluator.evaluate(masks, sample['masks'], device)
+
+
+                            num_eps_list += torch.mean(outputs['num_eps_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+                            num_pruned_pixels_list += torch.mean(outputs['num_pruned_pixels_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+                            num_pruned_slots_list += torch.mean(outputs['num_pruned_slots_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+
+                        val_recon_loss = total_val_recon_loss / len(loader_val)
+                        val_pos_loss = dict()
+                        for pos_loc in cfg.POS_PRED.LOCATIONS:
+                            val_pos_loss[pos_loc] = total_val_pos_loss[pos_loc] / len(loader_val)
+
+                        num_eps_list = num_eps_list / len(loader_val)
+                        num_pruned_pixels_list = num_pruned_pixels_list / len(loader_val)
+                        num_pruned_slots_list = num_pruned_slots_list / len(loader_val)
+
+                        val_ari = ari_evaluator.get_results()
+                        val_f_ari = f_ari_evaluator.get_results()
+                        val_mbo = mbo_evaluator.get_results()
+                        val_f_mbo = f_mbo_evaluator.get_results()
+
+                        end_epoch = time.time()
+
+                        print(
+                            "Val{}: F-ARI: {:.4f}, ARI: {:.4f}, F-MBo: {:.4f}, MBo: {:.4f}, Total Loss: {:.3e}, Recon Loss: {:.3e}, Pos Loss: {}, Time: {}".format(
+                                eval_suffix,
+                                val_f_ari,
+                                val_ari,
+                                val_f_mbo,
+                                val_mbo,
+                                val_loss,
+                                val_recon_loss, 
+                                val_pos_loss,
+                                datetime.timedelta(seconds=end_epoch - start_epoch)
+                            )
+                        )
+
+                        if cfg.MODEL.SLOT.USE_PRUNING:
+                            print(f"Avg. num of eps: {num_eps_list.tolist()}") 
+                            print(f"Avg. num of pruned pixels: {num_pruned_pixels_list.tolist()}") 
+                            print(f"Avg. num of pruned slots: {num_pruned_slots_list.tolist()}") 
+
+                        if log_writer is not None: 
+                            print(f'log_dir: {log_writer.log_dir}\n')
+                            log_writer.add_scalar(f'val_loss{eval_suffix}', val_loss, epoch+1)
+                            log_writer.add_scalar(f'val_recon_loss{eval_suffix}', val_recon_loss, epoch+1)
+                            for pos_loc in cfg.POS_PRED.LOCATIONS:
+                                log_writer.add_scalar(f'val_pos_loss{eval_suffix}_{pos_loc}', val_pos_loss[pos_loc], epoch+1)
+                            log_writer.add_scalar(f'val_ari{eval_suffix}', val_ari, epoch+1)
+                            log_writer.add_scalar(f'val_f_ari{eval_suffix}', val_f_ari, epoch+1)
+                            log_writer.add_scalar(f'val_mbo{eval_suffix}', val_mbo, epoch+1)
+                            log_writer.add_scalar(f'val_f_mbo{eval_suffix}', val_f_mbo, epoch+1)
+                            
+                            sample = next(iter(data_loader_vis))
+                            image = sample['image'].to(device)
+                            if cfg.WEAK_SUP.TYPE != "" and weak_sup_flag:
+                                pos_gt = sample[cfg.WEAK_SUP.TYPE].clone().detach() # only for calculating loss
+                                pos = pos_gt.clone().to(device) # for model prediction
+                            elif cfg.WEAK_SUP.TYPE != "":
+                                pos_gt = sample[cfg.WEAK_SUP.TYPE].clone().detach() # only for calculating loss
+                                pos = None
+                            else:
+                                pos_gt = None
+                                pos = None
+                            outputs = model(**dict(image=image, pos=pos, train=False))
+                            attns = torch.stack(outputs['attns'], dim=1)
+
+                            if cfg.POS_PRED.USE_POS_PRED:
+                                pos_pred = torch.stack(outputs['pos_pred'], dim=1)
+                                # `pos_pred_origin`: (B, L, K, 2)
+
+                                # omit the position prediction for the 0-th iteration
+                                if 0 in cfg.POS_PRED.LOCATIONS: 
+                                    pos_pred = pos_pred[:, 1:]
+                            else: 
+                                pos_pred = None 
+                                
+                            pos_existence_mask = None 
+                            
+                            log_img = None
+                            if not(0.25 in cfg.MODEL.FEAT_PYRAMID.RES_RATE_LIST or \
+                            0.5 in cfg.MODEL.FEAT_PYRAMID.RES_RATE_LIST):
+                                log_img = visualize(image=image, 
+                                                    recon_combined=outputs['recon_combined'],
+                                                    recons=outputs['recons'], 
+                                                    masks=outputs['masks'], 
+                                                    attns=attns, 
+                                                    pos_pred=pos_pred, 
+                                                    pos_pred_loc=cfg.POS_PRED.LOCATIONS, 
+                                                    pos_existence_mask=pos_existence_mask,
+                                                    num_vis=args.num_vis)
+                                log_img = vutils.make_grid(log_img, nrow=1, pad_value=0)
+                                log_writer.add_image(f'val_visualization/epoch={epoch+1:04}{eval_suffix}', log_img)
+
+                            if cfg.MODEL.SLOT.USE_PRUNING: 
+                                for t in range(cfg.MODEL.SLOT.ITERATIONS):
+                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
+
+                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
+
+                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
+                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
+                    
+                del outputs, masks, attns, image, recons, recon_combined, log_img   
+                del ari_evaluator, f_ari_evaluator, mbo_evaluator, f_mbo_evaluator
+                # TODO: sanity check for what it does
+                # torch.cuda.empty_cache()
+
+
+    if log_writer is not None:
+        log_writer.close()
+
+if __name__ == "__main__":
+    # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+
+    print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
+
+    parser = argparse.ArgumentParser('Slot Attention training script', parents=[get_args_parser()])
+    args = parser.parse_args()
+    main(args=args)
+

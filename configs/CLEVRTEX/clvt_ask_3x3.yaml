@@ -1,0 +1,16 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevrtex' 
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/clvt_ask_3x3/'
+TRAIN:
+  OPTIMIZER: 'adam'
+MODEL:
+  SLOT:
+    NUM: 11
+    ATTN_SMOOTH: "normed_softmax"
+    ATTN_SMOOTH_SIZE: 3

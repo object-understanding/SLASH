@@ -1,0 +1,10 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'objr'
+  IMG_SIZE: 64
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_objr_1000e/'
+

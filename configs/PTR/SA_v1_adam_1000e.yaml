@@ -1,0 +1,20 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'ptr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'MOVi', 'movi']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+TRAIN:
+  OPTIMIZER: 'adam'
+OUTPUT:
+  DIR: './output_dir/sa_base_v1_adam_ptr_1000e/'
+MODEL:
+  SLOT:
+    NUM: 7
+    DIM: 128
+  ENC_DEPTH: 4
+  DEC_DEPTH: 6
+  HID_DIM: 64
+  DEC_HID_DIM: 64
+  MLP_HID_DIM: 128

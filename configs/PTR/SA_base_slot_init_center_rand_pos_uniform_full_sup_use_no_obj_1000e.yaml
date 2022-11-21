@@ -1,0 +1,17 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'ptr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_base_slot_init_center_rand_pos_uniform_full_sup_use_no_obj_ptr_1000e/'
+WEAK_SUP:
+  TYPE: 'bbox_center' # ['', 'bbox', 'bbox_center']
+  USE_NO_OBJ: True # TODO: find alternative for the variable name 'use_no_obj'
+  RAND_PROP: 1.0
+  RAND_POS_TYPE: 'uniform' # ['uniform', 'standard_gaussian', 'learnable_gaussian']
+  INIT_USING_SUP: True
+  SPLIT:
+    RATIO: 1.0 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]

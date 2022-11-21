@@ -1,0 +1,14 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'ptr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/ptr_ask/'
+TRAIN:
+  OPTIMIZER: 'adam'
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "normed_softmax"

@@ -1,0 +1,20 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+  NUM_WORKERS: 30
+OUTPUT:
+  DIR: './output_dir/sa_small_clevr6_1000e/'
+MODEL:
+  SLOT:
+    NUM: 7
+    DIM: 32
+    ITERATIONS: 3
+    ATTN_HEADS: 1
+    TEMPERATURE: 1.0
+  ENC_DEPTH: 4
+  DEC_DEPTH: 6
+  HID_DIM: 32
+  MLP_HID_DIM: 32
