@@ -1,0 +1,13 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/ARK_gaussian_clv6/'
+TRAIN:
+  OPTIMIZER: 'adam'
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "gaussian"

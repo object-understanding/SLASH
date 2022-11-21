@@ -38,18 +38,12 @@ def get_args_parser():
     parser.add_argument('--epochs', default=0, type=int)
     parser.add_argument('--num_vis', default=4, type=int)
 
-    # distributed training parameters
-    parser.add_argument('--eval_on_single_gpu', action='store_true')
-    # parser.add_argument('--pin_mem', default=0, type=int) # TODO: do we need this?
-
     return parser
 
 
 def main(args):
     cfg = set_config(args.config_file)
 
-    if args.eval_on_single_gpu:
-        cfg.TRAIN.EVAL_ON_SINGLE_GPU = True
     if args.batch_size > 0:
         cfg.TRAIN.BATCH_SIZE = args.batch_size
     if args.lr > 0:

@@ -9,7 +9,6 @@ DATA:
 OUTPUT:
   DIR: './output_dir/'
 TRAIN:
-  EVAL_ON_SINGLE_GPU: False
   BATCH_SIZE: 64 
   EPOCHS: 1000
   OPTIMIZER: 'adam' # change this as adam
