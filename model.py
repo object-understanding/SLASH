@@ -9,22 +9,21 @@ from scipy.optimize import linear_sum_assignment
 from utils.slot import * 
 
 # Kernel Normalized Kernel
-class KNConv2d(nn.Conv2d):
+class WNConv(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, padding, bias=False, norm_type="softmax", use_normed_logits=False):
-        assert norm_type in ['linear', 'softmax', 'normed_linear', 'normed_softmax']
-        super(KNConv2d, self).__init__(in_channels, out_channels, kernel_size, padding=padding, bias=bias)
+        super(WNConv, self).__init__(in_channels, out_channels, kernel_size, padding=padding, bias=bias)
         self.norm_type = norm_type
-        self.use_normed_logits = 'normed' in norm_type
 
     def forward(self, input):
         o_c, i_c, k1, k2 = self.weight.shape
         weight = torch.reshape(self.weight.data, (o_c, i_c, k1 * k2))
-        if self.use_normed_logits:
-            weight = weight / torch.linalg.norm(weight, dim=-1, keepdim=True) # norm logits to 1.
+        weight = weight / torch.linalg.norm(weight, dim=-1, keepdim=True) # norm logits to 1.
+
         if 'linear' in self.norm_type:
             weight = weight / torch.sum(weight, dim=-1, keepdim=True)
         elif 'softmax' in self.norm_type:
             weight = F.softmax(weight, dim=-1)
+
         self.weight = nn.Parameter(torch.reshape(weight, (o_c, i_c, k1, k2)))
 
         # we don't recommend ver lower than 1.7
@@ -64,7 +63,6 @@ class SlotAttention(nn.Module):
         self.pos_pred_use_gt = cfg.POS_PRED.USE_GT # TODO: name of variable?
         self.pos_pred_use_no_obj = cfg.POS_PRED.USE_NO_OBJ
         self.pos_pred_enc_mode = cfg.POS_PRED.POS_ENC_MODE
-        self.aux_pos_loss = cfg.POS_PRED.AUX_POS_LOSS
         self.pos_pred_location_list = cfg.POS_PRED.LOCATIONS
         self.use_background_pos = cfg.POS_PRED.BACKGROUND_POS
         self.background_pos_value = cfg.POS_PRED.BACKGROUND_POS_VALUE
@@ -76,19 +74,8 @@ class SlotAttention(nn.Module):
         if not cfg.TRAIN.IS_DISTRIBUTED:
             self.batch_fusion_ws_num_samples //= torch.cuda.device_count()
 
-        self.use_pruning = cfg.MODEL.SLOT.USE_PRUNING 
-        self.pruning_type = cfg.MODEL.SLOT.PRUNING_TYPE 
-        self.pruning_threshold_pixel = cfg.MODEL.SLOT.PRUNING_THRESHOLD_PIXEL
-        self.pruning_threshold_slot = cfg.MODEL.SLOT.PRUNING_THRESHOLD_SLOT
-        self.pruning_location_list = cfg.MODEL.SLOT.PRUNING_LOCATIONS
-
         self.feature_pyramid_length = len(cfg.MODEL.FEAT_PYRAMID.RES_RATE_LIST)
         self.pyramid_aggregation_mode = cfg.MODEL.FEAT_PYRAMID.AGGREGATION
-
-        self.use_slot_pert = cfg.MODEL.SLOT.PERT.USE_PERT
-
-        self.use_gru = cfg.MODEL.SLOT.USE_GRU
-        self.use_lstm = cfg.MODEL.SLOT.USE_LSTM
 
         self.eps = eps
 
@@ -115,14 +102,6 @@ class SlotAttention(nn.Module):
             # original slot initialize
             self.slots_mu = nn.Parameter(torch.randn(1, 1, self.slot_dim))
             self.slots_sigma = nn.Parameter(torch.abs(torch.randn(1, 1, self.slot_dim)))
-
-        # slot perturbation
-        if self.use_slot_pert: 
-            if cfg.MODEL.SLOT.PERT.SIGMA > 0:
-                self.slot_pert_sigma = torch.full((1, 1, self.slot_dim), cfg.MODEL.SLOT.PERT.SIGMA, dtype=torch.float32, device=self.device)
-            else: 
-                self.slot_pert_sigma = nn.Parameter(torch.abs(torch.randn(1, 1, self.slot_dim)))
-            
 
         # self.norm_input = nn.LayerNorm(self.hid_dim)
         self.norm_input = nn.ModuleList()
@@ -163,19 +142,14 @@ class SlotAttention(nn.Module):
                                      kernel_size=kernel_size,
                                      padding=kernel_size // 2,
                                      bias=False)
-            else:
-                self.knconv = KNConv2d(in_channels=1,
+            elif self.slot_attn_smooth == 'wnconv':
+                self.knconv = WNConv(in_channels=1,
                                     out_channels=1,
                                     kernel_size=kernel_size,
                                     padding=kernel_size // 2,
-                                    bias=False,
-                                    norm_type=self.slot_attn_smooth)
+                                    bias=False)
 
-
-        if self.use_lstm: 
-            self.lstm = nn.LSTMCell(self.slot_dim, self.slot_dim)
-        elif self.use_gru: 
-            self.gru = nn.GRUCell(self.slot_dim, self.slot_dim)
+        self.gru = nn.GRUCell(self.slot_dim, self.slot_dim)
 
         self.mlp = nn.Sequential(
             nn.Linear(self.slot_dim, self.mlp_hid_dim), nn.ReLU(), nn.Linear(self.mlp_hid_dim, self.slot_dim)
@@ -188,15 +162,10 @@ class SlotAttention(nn.Module):
             elif 'enc_pos_emb' in self.pos_enc_mode:
                 self.pos_encoder = nn.Linear(self.hid_dim, self.slot_dim)
 
-        if self.aux_pos_loss:
-            self.aux_pos_predictor = PositionPredictor(cfg)
-
-
     def predict_and_encode_position(self, slots, pos, pos_gt_aranged, pos_emb, train=False):
         assert slots is not None 
 
         pos_pred = None
-        aux_pos_pred = None
         if not train or (train and self.weak_sup_split_ratio >= 1 - 1e-4):
             if self.pos_pred_use_gt and pos != None:
                 if self.use_background_pos:
@@ -325,66 +294,13 @@ class SlotAttention(nn.Module):
         outputs = dict()
         outputs["pos_pred"] = pos_pred
         outputs["pos_gt_aranged"] = pos_gt_aranged
-        outputs["aux_pos_pred"] = aux_pos_pred
         outputs["slots"] = slots
         return outputs
-
-    def attention_pruning(self, attn, pruning_type, pruning_threshold_pixel, pruning_threshold_slot):
-        '''
-        Parameters: 
-            `attn`: (B, N_heads, N_in, K) 
-            `pruning_type`: string -> ['soft', 'hard']
-            `pruning_threshold_pixel`: float 
-            `pruning_threshold_slot`: float 
-        '''
-        B, N_heads, N_in, K = attn.shape 
-
-        if pruning_type == 'soft': 
-            pruning_mask =  torch.where(attn > self.pruning_threshold_pixel, 
-                                        torch.ones_like(attn, dtype=torch.long, device=self.device),
-                                        torch.zeros_like(attn, dtype=torch.long, device=self.device))
-            attn = pruning_mask * attn
-            attn += self.eps
-            
-            num_pruned_slots = 0 
-
-        if pruning_type == 'hard': 
-
-            pruned_attn = attn.clone().detach()
-            pruned_attn = torch.mean(pruned_attn, dim=1).permute(0, 2, 1)
-            pruned_attn = torch.where(pruned_attn > self.pruning_threshold_pixel, pruned_attn, 
-                                      torch.zeros_like(pruned_attn, dtype=torch.float32, device=self.device))
-            # `pruned_attn`: (B, K, N_in)
-
-            num_nonzero = torch.count_nonzero(pruned_attn, dim=2) 
-            # `num_nonzero`: (B, K)
-
-            pruned_attn_sum = torch.sum(pruned_attn, dim=2)
-            # `pruned_attn_sum`: (B, K)
-
-            pruned_attn_avg = torch.div(pruned_attn_sum, num_nonzero)
-            # `pruned_attn_avg`: (B, K)
-
-            pruned_attn_mask = torch.where(pruned_attn_avg > pruning_threshold_slot, 
-                                           torch.zeros_like(pruned_attn_avg, dtype=torch.float32, device=self.device), 
-                                           torch.ones_like(pruned_attn_avg, dtype=torch.float32, device=self.device))
-            # `pruned_attn_mask`: (B, K)
-            #   - 0 for survived slots, 1 for pruned slots
-
-            pruned_attn_idxs = torch.nonzero(pruned_attn_mask)
-            num_pruned_slots = pruned_attn_idxs.shape[0] / B
-            # `pruned_attn_idxs`: (?, 2)
-
-            attn[pruned_attn_idxs] = self.eps  
-            # `attn`: (B, N_heads, N_in, K)
-
-        return attn, num_pruned_slots
              
 
     def forward(self, inputs_list, num_slots=None, pos=None, pos_emb=None, train=False):
         outputs = dict()
         outputs["pos_pred"] = []
-        outputs["aux_pos_pred"] = []
 
         # B, N_in, D_in = inputs.shape
         B = inputs_list[0].shape[0]
@@ -432,11 +348,7 @@ class SlotAttention(nn.Module):
             k_list.append(self.to_k[input_i](inputs_list[input_i]).reshape(B, N_in_list[input_i], N_heads, -1).transpose(1, 2))
             v_list.append(self.to_v[input_i](inputs_list[input_i]).reshape(B, N_in_list[input_i], N_heads, -1).transpose(1, 2))
     
-
         pos_gt_aranged = None
-        num_eps_list = torch.zeros(self.iterations, dtype=torch.float32, device=self.device)
-        num_pruned_pixels_list = torch.zeros(self.iterations, dtype=torch.float32, device=self.device)
-        num_pruned_slots_list = torch.zeros(self.iterations, dtype=torch.float32, device=self.device)
 
         if not train:
             attns = list()
@@ -446,7 +358,6 @@ class SlotAttention(nn.Module):
             pp_outputs = self.predict_and_encode_position(slots, pos, pos_gt_aranged, pos_emb, train)
             outputs["pos_pred"].append(pp_outputs["pos_pred"]) 
             pos_gt_aranged = pp_outputs["pos_gt_aranged"]
-            outputs["aux_pos_pred"].append(pp_outputs["aux_pos_pred"])
             slots = pp_outputs["slots"]
 
         for iter_i in range(self.iterations):
@@ -459,9 +370,6 @@ class SlotAttention(nn.Module):
                 slots, _ = self.multihead_attn(self_attn_q, self_attn_k, self_attn_v)
 
             slots = self.norm_slots(slots)
-
-            if self.use_slot_pert: 
-                slots += torch.normal(0, self.slot_pert_sigma.expand(B, K, -1) + self.eps)
 
             q = (self.to_q(slots).reshape(B, K, N_heads, -1).transpose(1, 2))  
             # `q`: (B, N_heads, K, slot_D // N_heads)
@@ -476,8 +384,7 @@ class SlotAttention(nn.Module):
 
                 if self.slot_attn_smooth != '':
                     # TODO: this part can go to 
-                    # 1. after softmax of attn_logits
-                    # 2. after pruning
+                    # after softmax of attn_logits
                     attn_logits = attn_logits.permute(0, 3, 1, 2) # [B, K, N_heads, N_in]
                     attn_logits = attn_logits.reshape(-1, N_in_list[input_i])[:, None, :] # [B*K*N_head, 1, N_in]
                     img_size = int(N_in_list[input_i] ** 0.5)
@@ -488,15 +395,6 @@ class SlotAttention(nn.Module):
 
                 attn = (attn_logits / self.temperature).softmax(dim=-1) + self.eps  # Normalization over slots
                 # `attn`: (B, N_heads, N_in, K)
-
-                # TODO: when to apply pruning? every iter or specific iter?
-                if (input_i == 0) and (self.use_pruning) and ((iter_i + 1) in self.pruning_location_list): 
-                    count_zero_before = (attn <= self.eps).sum()
-                    attn, num_pruned_slots = self.attention_pruning(attn, self.pruning_type, self.pruning_threshold_pixel, self.pruning_threshold_slot)
-                    count_zero_after = (attn <= self.eps).sum()
-                    num_pruned_pixels_list[iter_i] = torch.div(count_zero_after - count_zero_before, B*K)
-                    num_pruned_slots_list[iter_i] = num_pruned_slots
-                    num_eps_list[iter_i] = torch.div(count_zero_before, B*K)
 
                 attn_list.append(attn) 
                 attn_origin_list.append(attn_origin)
@@ -567,18 +465,9 @@ class SlotAttention(nn.Module):
                 updates = torch.mean(torch.stack(updates_list, dim=0), dim=0)
                 # `updates`: (B, K, slot_D)
 
-            if self.use_lstm: 
-                if iter_i == 0: 
-                    lstm_cell = torch.zeros_like(slots_prev.reshape(-1, self.slot_dim))
-                slots, lstm_cell = self.lstm(
-                    updates.reshape(-1, self.slot_dim), (slots_prev.reshape(-1, self.slot_dim), lstm_cell)
-                )
-            elif self.use_gru: 
-                slots = self.gru(
-                    updates.reshape(-1, self.slot_dim), slots_prev.reshape(-1, self.slot_dim)
-                )
-            else: 
-                slots = updates  
+            slots = self.gru(
+                updates.reshape(-1, self.slot_dim), slots_prev.reshape(-1, self.slot_dim)
+            )
 
             slots = slots.reshape(B, -1, self.slot_dim)
 
@@ -586,7 +475,6 @@ class SlotAttention(nn.Module):
                 pp_outputs = self.predict_and_encode_position(slots, pos, pos_gt_aranged, pos_emb, train)
                 outputs["pos_pred"].append(pp_outputs["pos_pred"]) 
                 pos_gt_aranged = pp_outputs["pos_gt_aranged"]
-                outputs["aux_pos_pred"].append(pp_outputs["aux_pos_pred"])
                 slots = pp_outputs["slots"]
 
             slots = slots + self.mlp(self.norm_mlp(slots))
@@ -596,15 +484,11 @@ class SlotAttention(nn.Module):
             pp_outputs = self.predict_and_encode_position(slots, pos, pos_gt_aranged, pos_emb, train)
             outputs["pos_pred"].append(pp_outputs["pos_pred"]) 
             pos_gt_aranged = pp_outputs["pos_gt_aranged"]
-            outputs["aux_pos_pred"].append(pp_outputs["aux_pos_pred"])
             slots = pp_outputs["slots"]
 
         outputs["slots"] = slots
         outputs["attn"] = attn
         outputs["pos_gt_aranged"] = pos_gt_aranged
-        outputs["num_pruned_pixels_list"] = num_pruned_pixels_list
-        outputs["num_pruned_slots_list"] = num_pruned_slots_list
-        outputs["num_eps_list"] = num_eps_list
         if not train: 
             outputs["attns"] = attns
             outputs["attns_origin"] = attns_origin
@@ -624,7 +508,7 @@ def build_grid(resolution):
 
 """Adds soft positional embedding with learnable projection."""
 class SoftPositionEmbed(nn.Module):
-    def __init__(self, hidden_size, resolution, pe_scale, device):
+    def __init__(self, hidden_size, resolution, device):
         """Builds the soft position embedding layer.
         Args:
         hidden_size: Size of input feature dimension.
@@ -634,13 +518,12 @@ class SoftPositionEmbed(nn.Module):
         self.device = device
         self.embedding = nn.Linear(4, hidden_size, bias=True)
         self.grid = build_grid(resolution)
-        self.pe_scale = pe_scale
 
     def forward(self, inputs):
         # self.grid = self.grid.to(inputs.device)
         self.grid = self.grid.to(self.device)
         grid = self.embedding(self.grid)
-        return inputs + grid * self.pe_scale
+        return inputs + grid
 
     def get_pos_emb(self, pos):
         """ 
@@ -681,17 +564,12 @@ class Encoder(nn.Module):
 
         self.device = device
         
-        # self.encoder_pos = SoftPositionEmbed(hid_dim, resolution, cfg.MODEL.PE_SCALE, device)
-        # self.layer_norm = nn.LayerNorm([resolution[0] * resolution[1], hid_dim]) # is it right shape?
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(hid_dim, hid_dim), nn.ReLU(), nn.Linear(hid_dim, hid_dim)
-        # )
         self.encoder_pos_list = nn.ModuleList()
         self.layer_norm_list = nn.ModuleList()
         self.mlp_list = nn.ModuleList()
         for res_rate in self.feature_pyramid_res_rate_list:
             res = (int(resolution[0] * res_rate), int(resolution[1] * res_rate))
-            self.encoder_pos_list.append(SoftPositionEmbed(hid_dim, res, cfg.MODEL.PE_SCALE, device))
+            self.encoder_pos_list.append(SoftPositionEmbed(hid_dim, res, device))
             self.layer_norm_list.append(nn.LayerNorm([res[0] * res[1], hid_dim]))
             self.mlp_list.append(nn.Sequential(nn.Linear(hid_dim, hid_dim), nn.ReLU(), nn.Linear(hid_dim, hid_dim)))
 
@@ -732,7 +610,7 @@ class Decoder(nn.Module):
         self.resolution = (target_size, target_size)
         self.dec_init_size = cfg.MODEL.DEC_INIT_SIZE
         dec_init_resolution = (self.dec_init_size, self.dec_init_size)
-        self.decoder_pos = SoftPositionEmbed(cfg.MODEL.SLOT.DIM, dec_init_resolution, cfg.MODEL.PE_SCALE, device)
+        self.decoder_pos = SoftPositionEmbed(cfg.MODEL.SLOT.DIM, dec_init_resolution, device)
         upsample_step = int(np.log2(target_size // self.dec_init_size))
         
         count_layer = 0 
@@ -847,9 +725,6 @@ class SlotAttentionAutoEncoder(nn.Module):
         super().__init__()
         self.device = device
         self.slot_dim = cfg.MODEL.SLOT.DIM
-        self.use_weighted_recon_loss = cfg.TRAIN.WEIGHTED_RECON_LOSS.USE_WRL
-        self.wrl_soft = cfg.TRAIN.WEIGHTED_RECON_LOSS.SOFT
-        self.wrl_scale_by = cfg.TRAIN.WEIGHTED_RECON_LOSS.SCALE_BY
 
         self.encoder_cnn = Encoder(cfg, device=device)
         self.decoder_cnn = Decoder(cfg, device=device)
@@ -884,23 +759,6 @@ class SlotAttentionAutoEncoder(nn.Module):
         # Normalize alpha masks over slots.
         masks = nn.Softmax(dim=1)(masks)
 
-        # Calculate mask affinity map
-        mask_affinity = None
-        if self.use_weighted_recon_loss:
-            # elemenwise product through slot channel
-            mask_affinity_shape = mask_affinity.shape
-            mask_affinity = torch.exp(torch.sum(torch.log(masks.clone().detach()), dim=1)) # [B, height, width, 1]
-            mask_affinity = mask_affinity.reshape(masks.shape[0], -1, 1)
-            # TODO: how to scale mask_affintiy
-            if self.wrl_scale_by == 'mean':
-                mask_affinity /= torch.mean(mask_affinity, dim=1, keepdim=True)
-            mask_affinity = mask_affinity.reshape(mask_affinity_shape)
-            mask_affinity = torch.sigmoid(mask_affinity - 1)
-            if not self.wrl_soft:
-                # TODO: make bit mask using threshold
-                pass 
-            mask_affinity = mask_affinity.permute(0, 3, 1, 2)
-
         recon_combined = torch.sum(recons * masks, dim=1)  # Recombine image.
         recon_combined = recon_combined.permute(0, 3, 1, 2)
         # `recon_combined` has shape: [batch_size, num_channels, height, width].
@@ -911,13 +769,8 @@ class SlotAttentionAutoEncoder(nn.Module):
         outputs['masks'] = masks
         outputs['slots'] = slots
         outputs['attn'] = sa_outputs["attn"]
-        outputs['mask_affinity'] = mask_affinity
         outputs['pos_pred'] = sa_outputs["pos_pred"]
         outputs['pos_gt_aranged'] = sa_outputs['pos_gt_aranged']
-        outputs['aux_pos_pred'] = sa_outputs["aux_pos_pred"]
-        outputs['num_pruned_pixels_list'] = sa_outputs['num_pruned_pixels_list']
-        outputs['num_pruned_slots_list'] = sa_outputs['num_pruned_slots_list']
-        outputs['num_eps_list'] = sa_outputs['num_eps_list']
         if not train: 
             outputs['attns'] = sa_outputs['attns']
             outputs['attns_origin'] = sa_outputs['attns_origin']
@@ -925,69 +778,3 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         return outputs
 
-class SlotAttentionClassifier(nn.Module):
-    """Slot Attention-based classifier for property prediction."""
-    
-    def __init__(self, cfg, device):
-        # TODO: update below docstring
-        """Builds the Slot Attention-based classifier.
-        Args:
-        resolution: Tuple of integers specifying width and height of input image.
-        num_slots: Number of slots in Slot Attention.
-        num_iterations: Number of iterations in Slot Attention.
-        """
-        super().__init__()
-        self.device = device
-        self.slot_dim = cfg.MODEL.SLOT.DIM
-        self.num_cls = cfg.MODEL.SET_PREDICTION.NUM_CLASSES
-        self.mlp_hid_dim = cfg.MODEL.SET_PREDICTION.MLP_HID_DIM
-        self.mlp_depth = cfg.MODEL.SET_PREDICTION.MLP_DEPTH
-        assert self.mlp_depth >= 2
-
-        self.encoder_cnn = Encoder(cfg, device=device)
-
-        self.slot_attention = SlotAttention(cfg=cfg, eps=1e-8, device=device)
-
-        mlp_classifier = [nn.Linear(self.slot_dim, self.mlp_hid_dim),
-                          nn.ReLU()]
-        for _ in range(self.mlp_depth - 2):
-            mlp_classifier.extend([nn.Linear(self.mlp_hid_dim, self.mlp_hid_dim),
-                                   nn.ReLU()])    
-        mlp_classifier.append(nn.Linear(self.mlp_hid_dim, self.num_cls))
-        if cfg.SET_PREDICTION.LOSS != 'bce':
-            mlp_classifier.append(nn.Sigmoid()) # do not need this for BCEWithLogitsLoss
-        self.mlp_classifier = nn.Sequential(*mlp_classifier) 
-
-    def forward(self, image, pos=None, train=True):
-        # `image` has shape: [batch_size, num_channels, height, width].
-        
-        # Convolutional encoder with position embedding.
-        # x = self.encoder_cnn(image)  # CNN Backbone.
-        x_list = self.encoder_cnn(image)  # CNN Backbone.
-
-        # `x` has shape: [B, height*width, hid_dim].
-
-        # Slot Attention module.
-        # sa_outputs = self.slot_attention(x, pos=pos, train=train)
-        sa_outputs = self.slot_attention(x_list, pos=pos, train=False)
-        slots = sa_outputs["slots"].detach().clone().requires_grad_()
-        # `slots` has shape: [N, K, slot_dim].
-
-        pred_slots = self.mlp_classifier[:-2](slots)
-        predictions = self.mlp_classifier[-2:](pred_slots) 
-
-        outputs = dict()
-        outputs['predictions'] = predictions
-        outputs['slots'] = slots
-        outputs['pred_slots'] = pred_slots
-        outputs['attn'] = sa_outputs["attn"]
-        outputs['pos_pred'] = sa_outputs["pos_pred"]
-        outputs['num_pruned_pixels_list'] = sa_outputs['num_pruned_pixels_list']
-        outputs['num_pruned_slots_list'] = sa_outputs['num_pruned_slots_list']
-        outputs['num_eps_list'] = sa_outputs['num_eps_list']
-        if not train: 
-            outputs['attns'] = sa_outputs['attns']
-            outputs['attns_origin'] = sa_outputs['attns_origin']
-            # `attns`: list of (B, N_heads, N_in, K) x T
-
-        return outputs

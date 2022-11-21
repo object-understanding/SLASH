@@ -19,7 +19,7 @@ from tqdm import tqdm
 from datasets import *
 from model import *
 from utils.vutil import visualize
-from utils.evaluator import ARIEvaluator, mBOEvaluator
+from utils.evaluator import ARIEvaluator, mIoUEvaluator
 from utils.config import *
 from utils import misc
 
@@ -40,7 +40,6 @@ def get_args_parser():
     parser.add_argument('--num_vis', default=4, type=int)
 
     # distributed training parameters
-    parser.add_argument('--turn_off_ddp', action='store_true') # TODO: it's deprecated, so erase it 
     parser.add_argument('--eval_on_single_gpu', action='store_true')
     # parser.add_argument('--pin_mem', default=0, type=int) # TODO: do we need this?
 
@@ -308,10 +307,6 @@ def main(args):
             len_data_loader = len(data_loader_train)
         else:
             len_data_loader = len(data_loader)
-        
-        num_eps_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
-        num_pruned_pixels_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
-        num_pruned_slots_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
 
         print(f"Backprop target losses: {backprop_target_losses}")
         for sample in tqdm(data_loader, desc='Epoch {}/{}'.format(epoch+1, cfg.TRAIN.EPOCHS), total=len_data_loader):
@@ -360,11 +355,7 @@ def main(args):
 
                 outputs = model(**dict(image=image, pos=pos, train=True))
 
-                # weighted recon loss
-                if cfg.TRAIN.WEIGHTED_RECON_LOSS.USE_WRL:
-                    loss = criterion(outputs['recon_combined'] * (1 - outputs['mask_affinity']), image * (1 - outputs['mask_affinity']))
-                else:
-                    loss = criterion(outputs['recon_combined'], image)
+                loss = criterion(outputs['recon_combined'], image)
                 total_recon_loss += loss.item()
                     
                 pos_loss = None
@@ -414,12 +405,8 @@ def main(args):
                 scaler.update()
                 # optimizer.step()
                 optimizer.zero_grad()
-
-            num_eps_list += torch.mean(outputs['num_eps_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
-            num_pruned_pixels_list += torch.mean(outputs['num_pruned_pixels_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
-            num_pruned_slots_list += torch.mean(outputs['num_pruned_slots_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
             
-            del outputs['recons'], outputs['masks'], outputs['slots'], outputs['attn'], outputs['num_pruned_pixels_list']
+            del outputs['recons'], outputs['masks'], outputs['slots'], outputs['attn']
             del image, sample, outputs, loss, pos_loss
             # TODO: sanity check for what it does
             # torch.cuda.empty_cache()
@@ -428,12 +415,6 @@ def main(args):
         train_pos_loss = dict()
         for pos_loc in cfg.POS_PRED.LOCATIONS:
             train_pos_loss[pos_loc] = total_pos_loss[pos_loc] / len_data_loader
-        # train_loss = train_recon_loss +\
-        #             train_pos_loss +\
-
-        num_eps_list = num_eps_list / len_data_loader
-        num_pruned_pixels_list = num_pruned_pixels_list / len_data_loader
-        num_pruned_slots_list = num_pruned_slots_list / len_data_loader
 
         end_epoch = time.time()
         elapsed_time += end_epoch - start_epoch
@@ -448,11 +429,6 @@ def main(args):
             )
         )
 
-        if cfg.MODEL.SLOT.USE_PRUNING:
-            print(f"Avg. num of eps: {num_eps_list.tolist()}") 
-            print(f"Avg. num of pruned pixels: {num_pruned_pixels_list.tolist()}") 
-            print(f"Avg. num of pruned slots: {num_pruned_slots_list.tolist()}") 
-
         if log_writer is not None: 
             print('log_dir: {}\n'.format(log_writer.log_dir))
             log_writer.add_scalar('train_loss', train_loss, epoch+1)
@@ -460,20 +436,6 @@ def main(args):
             for pos_loc in cfg.POS_PRED.LOCATIONS:
                 log_writer.add_scalar(f'train_pos_loss_{pos_loc}', train_pos_loss[pos_loc], epoch+1)
             log_writer.add_scalar('lr', lr, epoch+1)
-
-            if cfg.MODEL.SLOT.USE_PRUNING: 
-                for t in range(cfg.MODEL.SLOT.ITERATIONS):
-                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}', num_eps_list[t].item(), epoch+1)
-
-                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}', num_pruned_pixels_list[t].item(), epoch+1)
-
-                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
-                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}', num_pruned_slots_list[t].item(), epoch+1)
 
         # save ckpt 
         checkpoint = {
@@ -531,12 +493,8 @@ def main(args):
                     total_val_pos_loss = dict((pos_loc, 0) for pos_loc in cfg.POS_PRED.LOCATIONS)
                     ari_evaluator = ARIEvaluator()
                     f_ari_evaluator = ARIEvaluator()
-                    mbo_evaluator = mBOEvaluator()
-                    f_mbo_evaluator = mBOEvaluator()
-
-                    num_eps_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
-                    num_pruned_pixels_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
-                    num_pruned_slots_list = torch.zeros(cfg.MODEL.SLOT.ITERATIONS, dtype=torch.float32, device=device)
+                    miou_evaluator = mIoUEvaluator()
+                    f_miou_evaluator = mIoUEvaluator()
 
                     val_loader_list = [data_loader_val]
                     if cfg.DATA.TYPE.lower() == 'movi': 
@@ -567,11 +525,8 @@ def main(args):
 
                             recon_combined = outputs['recon_combined']
                             recons = outputs['recons']
-                            if cfg.TRAIN.WEIGHTED_RECON_LOSS.USE_WRL:
-                                mask_affinity = outputs['mask_affinity']
-                                loss = criterion(recon_combined * (1 - mask_affinity), image * (1 - mask_affinity))
-                            else:
-                                loss = criterion(recon_combined, image)
+                            
+                            loss = criterion(recon_combined, image)
                             total_val_recon_loss += loss.item()
 
                             if cfg.POS_PRED.USE_POS_PRED:
@@ -599,48 +554,34 @@ def main(args):
                             masks = outputs['masks']
                             f_ari_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
                             ari_evaluator.evaluate(masks, sample['masks'], device)
-                            f_mbo_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
-                            mbo_evaluator.evaluate(masks, sample['masks'], device)
-
-
-                            num_eps_list += torch.mean(outputs['num_eps_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
-                            num_pruned_pixels_list += torch.mean(outputs['num_pruned_pixels_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
-                            num_pruned_slots_list += torch.mean(outputs['num_pruned_slots_list'].reshape(-1, cfg.MODEL.SLOT.ITERATIONS), dim=0)
+                            f_miou_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
+                            miou_evaluator.evaluate(masks, sample['masks'], device)
 
                         val_recon_loss = total_val_recon_loss / len(loader_val)
                         val_pos_loss = dict()
                         for pos_loc in cfg.POS_PRED.LOCATIONS:
                             val_pos_loss[pos_loc] = total_val_pos_loss[pos_loc] / len(loader_val)
 
-                        num_eps_list = num_eps_list / len(loader_val)
-                        num_pruned_pixels_list = num_pruned_pixels_list / len(loader_val)
-                        num_pruned_slots_list = num_pruned_slots_list / len(loader_val)
-
                         val_ari = ari_evaluator.get_results()
                         val_f_ari = f_ari_evaluator.get_results()
-                        val_mbo = mbo_evaluator.get_results()
-                        val_f_mbo = f_mbo_evaluator.get_results()
+                        val_miou = miou_evaluator.get_results()
+                        val_f_miou = f_miou_evaluator.get_results()
 
                         end_epoch = time.time()
 
                         print(
-                            "Val{}: F-ARI: {:.4f}, ARI: {:.4f}, F-MBo: {:.4f}, MBo: {:.4f}, Total Loss: {:.3e}, Recon Loss: {:.3e}, Pos Loss: {}, Time: {}".format(
+                            "Val{}: F-ARI: {:.4f}, ARI: {:.4f}, F-mIoU: {:.4f}, mIoU: {:.4f}, Total Loss: {:.3e}, Recon Loss: {:.3e}, Pos Loss: {}, Time: {}".format(
                                 eval_suffix,
                                 val_f_ari,
                                 val_ari,
-                                val_f_mbo,
-                                val_mbo,
+                                val_f_miou,
+                                val_miou,
                                 val_loss,
                                 val_recon_loss, 
                                 val_pos_loss,
                                 datetime.timedelta(seconds=end_epoch - start_epoch)
                             )
                         )
-
-                        if cfg.MODEL.SLOT.USE_PRUNING:
-                            print(f"Avg. num of eps: {num_eps_list.tolist()}") 
-                            print(f"Avg. num of pruned pixels: {num_pruned_pixels_list.tolist()}") 
-                            print(f"Avg. num of pruned slots: {num_pruned_slots_list.tolist()}") 
 
                         if log_writer is not None: 
                             print(f'log_dir: {log_writer.log_dir}\n')
@@ -650,8 +591,8 @@ def main(args):
                                 log_writer.add_scalar(f'val_pos_loss{eval_suffix}_{pos_loc}', val_pos_loss[pos_loc], epoch+1)
                             log_writer.add_scalar(f'val_ari{eval_suffix}', val_ari, epoch+1)
                             log_writer.add_scalar(f'val_f_ari{eval_suffix}', val_f_ari, epoch+1)
-                            log_writer.add_scalar(f'val_mbo{eval_suffix}', val_mbo, epoch+1)
-                            log_writer.add_scalar(f'val_f_mbo{eval_suffix}', val_f_mbo, epoch+1)
+                            log_writer.add_scalar(f'val_miou{eval_suffix}', val_miou, epoch+1)
+                            log_writer.add_scalar(f'val_f_miou{eval_suffix}', val_f_miou, epoch+1)
                             
                             sample = next(iter(data_loader_vis))
                             image = sample['image'].to(device)
@@ -693,23 +634,9 @@ def main(args):
                                                     num_vis=args.num_vis)
                                 log_img = vutils.make_grid(log_img, nrow=1, pad_value=0)
                                 log_writer.add_image(f'val_visualization/epoch={epoch+1:04}{eval_suffix}', log_img)
-
-                            if cfg.MODEL.SLOT.USE_PRUNING: 
-                                for t in range(cfg.MODEL.SLOT.ITERATIONS):
-                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_eps_per_slot_iter{t+1}_{eval_suffix}', num_eps_list[t].item(), epoch+1)
-
-                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_pruned_pixels_per_slot_iter{t+1}_{eval_suffix}', num_pruned_pixels_list[t].item(), epoch+1)
-
-                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
-                                    log_writer.add_scalar(f'num_pruned_slots_per_slot_iter{t+1}_{eval_suffix}', num_pruned_slots_list[t].item(), epoch+1)
                     
                 del outputs, masks, attns, image, recons, recon_combined, log_img   
-                del ari_evaluator, f_ari_evaluator, mbo_evaluator, f_mbo_evaluator
+                del ari_evaluator, f_ari_evaluator, miou_evaluator, f_miou_evaluator
                 # TODO: sanity check for what it does
                 # torch.cuda.empty_cache()
 
