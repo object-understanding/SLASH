@@ -9,5 +9,5 @@ OUTPUT:
   DIR: './output_dir/ARK_wnconv_ptr/'
 MODEL:
   SLOT:
-    ATTN_SMOOTH: "softmax"
+    ATTN_SMOOTH: "wnconv"
     ATTN_SMOOTH_SIZE: 5

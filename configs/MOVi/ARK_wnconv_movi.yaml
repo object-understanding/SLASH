@@ -10,3 +10,4 @@ OUTPUT:
 MODEL:
   SLOT:
     ATTN_SMOOTH: "wnconv"
+    ATTN_SMOOTH_SIZE: 5
