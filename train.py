@@ -176,8 +176,6 @@ def main(args):
     params = [{'params': model.parameters()}]
     if cfg.TRAIN.OPTIMIZER.lower() == 'adam':
         optimizer = optim.Adam(params, lr=cfg.TRAIN.BASE_LR)
-    if cfg.TRAIN.OPTIMIZER.lower() == 'adamw':
-        optimizer = optim.AdamW(params, lr=cfg.TRAIN.BASE_LR)
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     model = model.to(device)
@@ -325,7 +323,6 @@ def main(args):
 
                     for pos_i, pos_loc in enumerate(cfg.POS_PRED.LOCATIONS):
                         pos_pred = outputs['pos_pred'][pos_i]
-                        # pos_gt = pos_gt.to(pos_pred.device)
                         pos_gt = pos_gt.to(device)
 
                         if use_batch_fusion:
