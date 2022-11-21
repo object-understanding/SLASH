@@ -2,7 +2,7 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  TYPE: 'clevr'
   IMG_SIZE: 128
 OUTPUT:
   DIR: './output_dir/SA_clv10/'

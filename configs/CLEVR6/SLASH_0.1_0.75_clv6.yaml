@@ -2,7 +2,7 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'MOVi', 'movi']
+  TYPE: 'clevr'
   IMG_SIZE: 128
 OUTPUT:
   DIR: './output_dir/SLASH_0.1_0.75_clv6/'
@@ -10,7 +10,6 @@ TRAIN:
   EPOCHS: 800
   BATCH_SIZE: 256
   POS_LOSS_WEIGHT: 0.01
-  OPTIMIZER: 'adam'
 WEAK_SUP:
   TYPE: "bbox_center"
   USE_NO_OBJ: False
@@ -26,7 +25,8 @@ POS_PRED:
   USE_POS_PRED: True
   USE_GT: True
   POS_ENC_MODE: "learnable"
-  LOCATIONS: [1,2,3] # -1 to last one, 1,2,3,.. to iteration number # TODO: name of variable?
+  LOCATIONS: [1,2,3] 
 MODEL:
   SLOT:
-    ATTN_SMOOTH: "softmax"
+    ATTN_SMOOTH: "wnconv"
+    ATTN_SMOOTH_SIZE: 5

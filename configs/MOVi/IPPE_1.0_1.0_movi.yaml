@@ -2,10 +2,10 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' 
+  TYPE: 'movi'
   IMG_SIZE: 128
 OUTPUT:
-  DIR: './output_dir/IPPE_0.1_0.75_clv6/'
+  DIR: './output_dir/IPPE_1.0_1.0_movi/'
 TRAIN:
   EPOCHS: 800
   BATCH_SIZE: 256
@@ -13,14 +13,11 @@ TRAIN:
 WEAK_SUP:
   TYPE: "bbox_center"
   USE_NO_OBJ: False
-  RANDOM_PROP: 0.75
+  RANDOM_PROP: 1.0
   RAND_POS_TYPE: "uniform" # it can be "standard_gaussian"
   INIT_USING_SUP: False
   SPLIT:
-    RATIO: 0.1
-    TRAIN:
-      MODE: 'batch_fusion' # ['','interval', 'epoch_ranges', 'batch_fusion']
-      BATCH_FUSION_RATIO: 0.25
+    RATIO: 1.0
 POS_PRED:
   USE_POS_PRED: True
   USE_GT: True

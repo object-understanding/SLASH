@@ -2,10 +2,11 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' 
+  TYPE: 'ptr' 
   IMG_SIZE: 128
+  NUM_WORKERS: 4
 OUTPUT:
-  DIR: './output_dir/IPPE_0.1_0.75_clv6/'
+  DIR: './output_dir/IPPE_0.1_0.75_ptr/'
 TRAIN:
   EPOCHS: 800
   BATCH_SIZE: 256

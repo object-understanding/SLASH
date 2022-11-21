@@ -2,13 +2,13 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr'
+  TYPE: 'movi'
   IMG_SIZE: 128
 OUTPUT:
-  DIR: './output_dir/WSSA_0.1_0.75_clv6/'
+  DIR: './output_dir/WSSA_0.1_0.75_movi/'
 WEAK_SUP:
   TYPE: 'bbox_center'
-  USE_NO_OBJ: False
+  USE_NO_OBJ: False 
   RAND_PROP: 0.75
   RAND_POS_TYPE: 'standard_gaussian' # ['uniform', 'standard_gaussian', 'learnable_gaussian']
   INIT_USING_SUP: True

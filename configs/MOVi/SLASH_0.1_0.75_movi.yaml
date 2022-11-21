@@ -2,10 +2,10 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' 
+  TYPE: 'movi' 
   IMG_SIZE: 128
 OUTPUT:
-  DIR: './output_dir/IPPE_0.1_0.75_clv6/'
+  DIR: './output_dir/SLASH_0.1_0.75_movi/'
 TRAIN:
   EPOCHS: 800
   BATCH_SIZE: 256
@@ -25,4 +25,8 @@ POS_PRED:
   USE_POS_PRED: True
   USE_GT: True
   POS_ENC_MODE: "learnable"
-  LOCATIONS: [1,2,3]
+  LOCATIONS: [1,2,3] 
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "wnconv"
+    ATTN_SMOOTH_SIZE: 5

@@ -2,10 +2,10 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr' 
+  TYPE: 'movi'
   IMG_SIZE: 128
 OUTPUT:
-  DIR: './output_dir/clv6_temperature_2.0/'
+  DIR: './output_dir/ARK_conv_movi/'
 MODEL:
   SLOT:
-    TEMPERATURE: 2.0
+    ATTN_SMOOTH: "conv"

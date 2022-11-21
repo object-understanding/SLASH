@@ -45,6 +45,7 @@ WEAK_SUP:
   USE_NO_OBJ: False # TODO: find alternative for the variable name 'use_no_obj'
   RAND_PROP: 1.0
   INIT_USING_SUP: False
+  RAND_POS_TYPE: 'uniform' # ['uniform', 'standard_gaussian', 'learnable_gaussian']
   SPLIT:
     RATIO: 1.0 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
     TRAIN:
@@ -57,7 +58,7 @@ WEAK_SUP:
 POS_PRED:
   USE_POS_PRED: False
   USE_GT: False # TODO: name of variable?
-  POS_ENC_MODE: "learnable" # ["learnable", "sinusoidal"]
+  POS_ENC_MODE: "learnable" 
   USE_NO_OBJ: False
-  LOCATIONS: [] # -1 to last one, 1,2,3,.. to iteration number # TODO: name of variable?
+  LOCATIONS: [] # 1,2,3,.. to iteration number # TODO: name of variable?
   PP_SIZE: 'base' # ['small', 'base', 'big']

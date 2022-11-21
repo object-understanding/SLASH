@@ -2,9 +2,9 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'ptr' # ['clevr', 'CLEVR', 'ptr', 'PTR', 'msn', 'MSN']
+  TYPE: 'ptr' 
   IMG_SIZE: 128
-  NUM_WORKERS: 30
+  NUM_WORKERS: 4
 TRAIN:
   OPTIMIZER: 'adam'
 OUTPUT:

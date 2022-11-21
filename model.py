@@ -51,6 +51,7 @@ class SlotAttention(nn.Module):
         self.scale = (cfg.MODEL.SLOT.DIM // cfg.MODEL.SLOT.ATTN_HEADS) ** -0.5
         self.weak_sup = cfg.WEAK_SUP.TYPE
         self.use_no_obj = cfg.WEAK_SUP.USE_NO_OBJ
+        self.rand_pos_type = cfg.WEAK_SUP.RAND_POS_TYPE
         self.init_using_sup = cfg.WEAK_SUP.INIT_USING_SUP
         self.weak_sup_split_ratio = cfg.WEAK_SUP.SPLIT.RATIO
         self.temperature = cfg.MODEL.SLOT.TEMPERATURE
@@ -87,9 +88,12 @@ class SlotAttention(nn.Module):
             self.slot_initializer = nn.Sequential(
                 nn.Linear(pos_num, self.slot_dim * 2), nn.ReLU(), nn.Linear(self.slot_dim * 2, self.slot_dim)
             )
-            # random position initialize to fill in where pos == -1 
-            self.pos_mu = torch.zeros(1, 1, pos_num)
-            self.pos_sigma = torch.ones(1, 1, pos_num)
+            if self.rand_pos_type == 'standard_gaussian' and not self.use_no_obj:
+                self.pos_mu = torch.zeros(1, 1, pos_num)
+                self.pos_sigma = torch.ones(1, 1, pos_num)
+            elif self.rand_pos_type == 'learnable_gaussian'and not self.use_no_obj:
+                self.pos_mu = nn.Parameter(torch.randn(1, 1, pos_num))
+                self.pos_sigma = nn.Parameter(torch.abs(torch.randn(1, 1, pos_num)))
         else:
             # original slot initialize
             self.slots_mu = nn.Parameter(torch.randn(1, 1, self.slot_dim))
@@ -280,9 +284,12 @@ class SlotAttention(nn.Module):
             if pos is None:
                 pos = -1 * torch.ones(B, K, 2).to(self.device)
             if not self.use_no_obj:
-                pos_mu = self.pos_mu.expand(B, K, -1)
-                pos_sigma = torch.abs(self.pos_sigma.expand(B, K, -1))
-                rand_pos = torch.normal(pos_mu, pos_sigma)
+                if self.rand_pos_type == 'uniform':
+                    rand_pos = torch.rand(pos.shape) - 0.5
+                elif self.rand_pos_type in ['standard_gaussian', 'learnable_gaussian']:
+                    pos_mu = self.pos_mu.expand(B, K, -1)
+                    pos_sigma = torch.abs(self.pos_sigma.expand(B, K, -1))
+                    rand_pos = torch.normal(pos_mu, pos_sigma)
                 if self.use_batch_fusion:
                     pos[self.batch_fusion_ws_num_samples:] = -1.
                 pos = torch.where(pos > -1, pos, rand_pos.to(self.device))

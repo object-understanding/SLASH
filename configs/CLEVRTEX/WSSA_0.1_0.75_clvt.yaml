@@ -2,18 +2,24 @@ _BASE_: "../SA_base.yaml"
 SEED: 0
 DEVICE: 'cuda'
 DATA:
-  TYPE: 'clevr'
+  TYPE: 'clevrtex' 
   IMG_SIZE: 128
 OUTPUT:
-  DIR: './output_dir/WSSA_0.1_0.75_clv6/'
+  DIR: './output_dir/WSSA_0.1_0.75_clvt/'
+TRAIN:
+  OPTIMIZER: 'adam'
+  EPOCHS: 800
 WEAK_SUP:
   TYPE: 'bbox_center'
-  USE_NO_OBJ: False
-  RAND_PROP: 0.75
+  USE_NO_OBJ: False 
   RAND_POS_TYPE: 'standard_gaussian' # ['uniform', 'standard_gaussian', 'learnable_gaussian']
+  RAND_PROP: 0.75
   INIT_USING_SUP: True
   SPLIT:
     RATIO: 0.1 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
     TRAIN:
       MODE: 'batch_fusion' # ['','interval', 'epoch_ranges', 'batch_fusion']
       BATCH_FUSION_RATIO: 0.25
+MODEL:
+  SLOT:
+    NUM: 11
