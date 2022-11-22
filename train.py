@@ -87,7 +87,7 @@ def main(args):
 
     dataset_train_sub = []
 
-    elif cfg.DATA.TYPE.lower() == 'clevr':
+    if cfg.DATA.TYPE.lower() == 'clevr':
         dataset_train = CLEVR(data_dir=args.data_dir, phase='train', cfg=cfg)
         dataset_val = CLEVR(data_dir=args.data_dir, phase='val', cfg=cfg)
         if cfg.WEAK_SUP.SPLIT.RATIO < 1 or use_batch_fusion:
