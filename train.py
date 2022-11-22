@@ -552,8 +552,6 @@ def main(args):
                                     pos_pred = pos_pred[:, 1:]
                             else: 
                                 pos_pred = None 
-                                
-                            pos_existence_mask = None 
                             
                             log_img = None
                             # TODO: vis for low res
@@ -566,7 +564,6 @@ def main(args):
                                                     attns=attns, 
                                                     pos_pred=pos_pred, 
                                                     pos_pred_loc=cfg.POS_PRED.LOCATIONS, 
-                                                    pos_existence_mask=pos_existence_mask,
                                                     num_vis=args.num_vis)
                                 log_img = vutils.make_grid(log_img, nrow=1, pad_value=0)
                                 log_writer.add_image(f'val_visualization/epoch={epoch+1:04}{eval_suffix}', log_img)
