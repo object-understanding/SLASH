@@ -84,10 +84,10 @@ def main(args):
     model.load_state_dict(torch.load(checkpoint, map_location=device)['model_state_dict'])
     # model = nn.DataParallel(model).to(device)
 
-    ari_evaluator = ARIEvaluator()
     f_ari_evaluator = ARIEvaluator()
-    mbo_evaluator = mBOEvaluator()
-    f_mbo_evaluator = mBOEvaluator()
+    ari_evaluator = ARIEvaluator()
+    f_miou_evaluator = mIoUEvaluator()
+    miou_evaluator = mIoUEvaluator()
 
     image_dir = os.path.join(args.workspace, 'images')
     os.makedirs(image_dir, exist_ok=True)
@@ -111,8 +111,8 @@ def main(args):
 
             f_ari_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
             ari_evaluator.evaluate(masks, sample['masks'], device)
-            f_mbo_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
-            mbo_evaluator.evaluate(masks, sample['masks'], device)
+            f_miou_evaluator.evaluate(masks, sample['masks'][:, 1:], device)
+            miou_evaluator.evaluate(masks, sample['masks'], device)
                 
             total_mse += criterion(recon_combined, image).item()
 
