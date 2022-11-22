@@ -119,8 +119,6 @@ def main(args):
             filename = filename + '_' + args.tag
         filename = filename + '_' + str(i)
 
-        pos_existence_mask = None 
-
         if args.vis_type == 'normal':
             log_img = visualize(image=image, 
                                 recon_combined=outputs['recon_combined'],
@@ -128,8 +126,7 @@ def main(args):
                                 masks=outputs['masks'], 
                                 attns=attns, 
                                 pos_pred=pos_pred, # pos_pred=None, 
-                                pos_pred_loc=cfg.POS_PRED.LOCATIONS, 
-                                pos_existence_mask=pos_existence_mask)
+                                pos_pred_loc=cfg.POS_PRED.LOCATIONS)
 
         if args.vis_type == 'attns':
             log_img = visualize_attns(image=image, 
@@ -138,23 +135,10 @@ def main(args):
                                     pred_masks=outputs['masks'], 
                                     gt_masks=masks.unsqueeze(-1),
                                     attns=attns, 
+                                    # attns_origin=None, 
                                     attns_origin=attns_origin,
                                     pos_pred=None, 
-                                    pos_pred_loc=None, 
-                                    pos_existence_mask=None,)
-
-        if args.vis_type == 'simple':
-            log_img = visualize_simple(image=image, 
-                                    recon_combined=outputs['recon_combined'],
-                                    recons=outputs['recons'], 
-                                    pred_masks=outputs['masks'], 
-                                    gt_masks=masks.unsqueeze(-1),
-                                    attns=attns, 
-                                    attns_origin=None, # attns_origin=attns_origin,
-                                    # attns_origin=attns_origin,
-                                    pos_pred=None, 
-                                    pos_pred_loc=None, 
-                                    pos_existence_mask=None,)
+                                    pos_pred_loc=None)
                                     
         log_img = vutils.make_grid(log_img, nrow=1, pad_value=0)
         log_img = log_img.permute(1, 2, 0)
