@@ -1,0 +1,11 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevrtex' 
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/SA_clvt/'
+MODEL:
+  SLOT:
+    NUM: 11

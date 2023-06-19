@@ -1,0 +1,13 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevrtex' 
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/ARK_wnconv_clvt/'
+MODEL:
+  SLOT:
+    NUM: 11
+    ATTN_SMOOTH: "wnconv"
+    ATTN_SMOOTH_SIZE: 5

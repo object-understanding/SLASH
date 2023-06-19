@@ -1,0 +1,9 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' 
+  IMG_SIZE: 128
+  CROP_SIZE: 198 # following the convention
+OUTPUT:
+  DIR: './output_dir/SA_crop_clv6/'

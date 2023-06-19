@@ -1,0 +1,17 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr'
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/WSSA_0.1_0.75_clv6/'
+WEAK_SUP:
+  TYPE: 'bbox_center'
+  RAND_PROP: 0.75
+  INIT_USING_SUP: True
+  SPLIT:
+    RATIO: 0.1 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+    TRAIN:
+      BATCH_FUSION: True
+      BATCH_FUSION_RATIO: 0.25

@@ -1,0 +1,11 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi'
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/ARK_conv_movi/'
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "conv"

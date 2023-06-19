@@ -1,0 +1,24 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi' 
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/IPPE_0.1_0.75_movi/'
+TRAIN:
+  EPOCHS: 800
+  BATCH_SIZE: 256
+  POS_LOSS_WEIGHT: 0.01
+WEAK_SUP:
+  TYPE: "bbox_center"
+  RANDOM_PROP: 0.75
+  INIT_USING_SUP: False
+  SPLIT:
+    RATIO: 0.1
+    TRAIN:
+      BATCH_FUSION: True
+      BATCH_FUSION_RATIO: 0.25
+POS_PRED:
+  USE_POS_PRED: True
+  USE_GT: True

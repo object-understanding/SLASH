@@ -1,0 +1,13 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'ptr'
+  IMG_SIZE: 128
+  NUM_WORKERS: 4
+OUTPUT:
+  DIR: './output_dir/ARK_wnconv_ptr/'
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "wnconv"
+    ATTN_SMOOTH_SIZE: 5

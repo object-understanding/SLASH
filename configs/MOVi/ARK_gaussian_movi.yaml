@@ -1,0 +1,13 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'movi'
+  IMG_SIZE: 128
+OUTPUT:
+  DIR: './output_dir/ARK_gaussian_movi/'
+MODEL:
+  SLOT:
+    ATTN_SMOOTH: "gaussian"
+    ATTN_SMOOTH_GAU_MIN: 0.1
+    ATTN_SMOOTH_GAU_MAX: 2.0

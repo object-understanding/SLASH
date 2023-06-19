@@ -1,0 +1,55 @@
+# full configuration
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'clevr' # ['clevr', 'clevrtex', 'ptr', 'movi']
+  IMG_SIZE: 128
+  CROP_SIZE: 0 # from from original image, 0 means no crop
+  NUM_WORKERS: 2
+OUTPUT:
+  DIR: './output_dir/'
+TRAIN:
+  BATCH_SIZE: 64 
+  EPOCHS: 1000
+  OPTIMIZER: 'adam' # change this as adam
+  BASE_LR: 0.0004
+  DECAY_RATE: 0.5
+  WARMUP_STEP_RATIO: 0.02 # warmup_steps: 10000
+  DECAY_STEP_RATIO: 0.2 # decay_steps: 100000
+  EVAL_INTERVAL: 100
+  POS_LOSS_WEIGHT: 1.
+MODEL:
+  SLOT:
+    NUM: 7
+    DIM: 64
+    ITERATIONS: 3
+    ATTN_HEADS: 1
+    ATTN_SMOOTH: '' # ['wnconv', 'gaussian', 'conv']
+    ATTN_SMOOTH_SIZE: 5
+    ATTN_SMOOTH_GAU_MIN: 0.1
+    ATTN_SMOOTH_GAU_MAX: 2.0
+    TEMPERATURE: 1.0
+  ENC_DEPTH: 4
+  DEC_DEPTH: 6
+  DEC_INIT_SIZE: 8
+  DEC_STRIDE: 2
+  HID_DIM: 64
+  DEC_HID_DIM: 0 # 0: ENC_HID_DIM == DEC_HID_DIM
+  MLP_HID_DIM: 128
+WEAK_SUP:
+  TYPE: '' # ['', 'bbox', 'bbox_center']
+  RAND_PROP: 1.0
+  INIT_USING_SUP: False
+  SPLIT:
+    RATIO: 1.0 # [0.01, 0.05, 0.1, 0.2, 0.5, 1.0]
+    TRAIN:
+      BATCH_FUSION: False 
+      INTERVAL: 0 
+      DURATION: 0
+      INTERVAL_START: 0 # should be in [0, INTERVAL-DURATION]
+      EPOCH_RANGES: [[0, 0]]
+      BATCH_FUSION_RATIO: 0.
+POS_PRED:
+  USE_POS_PRED: False
+  USE_GT: False 
+  PP_SIZE: 'base' # ['small', 'base', 'big']

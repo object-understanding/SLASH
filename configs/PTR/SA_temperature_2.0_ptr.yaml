@@ -1,0 +1,12 @@
+_BASE_: "../SA_base.yaml"
+SEED: 0
+DEVICE: 'cuda'
+DATA:
+  TYPE: 'ptr' 
+  IMG_SIZE: 128
+  NUM_WORKERS: 4
+OUTPUT:
+  DIR: './output_dir/SA_temperature_2.0_ptr/'
+MODEL:
+  SLOT:
+    TEMPERATURE: 2.0
