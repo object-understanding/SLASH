@@ -271,10 +271,11 @@ class SlotAttention(nn.Module):
 
             slots = slots.reshape(B, -1, D_slot)
 
-            pp_outputs = self.predict_and_encode_position(slots, pos, pos_gt_aranged, train)
-            outputs["pos_pred"].append(pp_outputs["pos_pred"]) 
-            pos_gt_aranged = pp_outputs["pos_gt_aranged"]
-            slots = pp_outputs["slots"]
+            if self.use_pos_pred:
+                pp_outputs = self.predict_and_encode_position(slots, pos, pos_gt_aranged, train)
+                outputs["pos_pred"].append(pp_outputs["pos_pred"]) 
+                pos_gt_aranged = pp_outputs["pos_gt_aranged"]
+                slots = pp_outputs["slots"]
 
             slots = slots + self.mlp(self.norm_mlp(slots))
 
