@@ -118,7 +118,10 @@ python train.py \
 
 ## Evaluation
 
+checkpoints will be available soon. (we are under code refactoring)
+<!--
 [[checkpoints](https://drive.google.com/file/d/1K6obkakAJPZbMSr33LcjLHLBLbFIZHOn/view?usp=share_link)]
+-->
 
 ```bash
 # evaluate SLASH on CLEVR6 dataset
